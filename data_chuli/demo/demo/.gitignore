@@ -1,0 +1,64 @@
+# Ignore everything
+*
+
+# But allow Python files
+!*.py
+
+# Keep important Git files
+!.gitignore
+!.gitattributes
+!README.md
+!开发日志.md
+
+# Allow essential directories if they contain Python files
+!CLIP/
+!CLIP/**/*.py
+!Siamese-pytorch-master/
+!Siamese-pytorch-master/**/*.py
+
+# Common patterns to ignore (these will be blocked by the * rule above)
+# This is just for documentation
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+.env
+.venv
+venv/
+ENV/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Large model files and data
+*.pt
+*.pth
+*.h5
+*.pkl
+*.pickle
+*.joblib
+datasets/
+model_data/
+logs/
+out/
+output*/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
