@@ -356,6 +356,56 @@ class _MetricsStore:
                 })
             return {"hours": out, "days": int(days)}
 
+    def reset(self) -> Dict[str, Any]:
+        """
+        重置统计数据，从当前时间重新开始监控
+
+        Returns:
+            重置后的状态信息
+        """
+        with self._lock:
+            # 重置服务启动时间
+            old_start_ts = self._service_start_ts
+            self._service_start_ts = time.time()
+
+            # 重置计数器
+            old_totals = dict(self._totals)
+            self._totals = {
+                "requests": 0,
+                "ok": 0,
+                "errors": 0,
+                "http_400": 0,
+                "http_500": 0,
+            }
+
+            # 清空分类统计
+            old_case_type = dict(self._case_type)
+            self._case_type = {}
+
+            # 清空端点统计
+            old_by_endpoint = dict(self._by_endpoint)
+            self._by_endpoint = {}
+
+            # 清空最近记录
+            old_recent_len = len(self._recent)
+            self._recent.clear()
+
+            # 清空小时统计
+            old_hourly_len = len(self._hourly)
+            self._hourly = {}
+
+            return {
+                "success": True,
+                "message": "统计已重置",
+                "old_service_start": datetime.datetime.fromtimestamp(old_start_ts).isoformat(),
+                "new_service_start": datetime.datetime.fromtimestamp(self._service_start_ts).isoformat(),
+                "cleared_totals": old_totals,
+                "cleared_case_types": old_case_type,
+                "cleared_endpoints": list(old_by_endpoint.keys()),
+                "cleared_recent_count": old_recent_len,
+                "cleared_hourly_count": old_hourly_len,
+            }
+
     def save_images(self, record_id: str, previews: Dict[str, str], meta: Dict[str, Any],
                     original_images: Optional[Dict[str, str]] = None) -> Optional[str]:
         """
@@ -2219,6 +2269,16 @@ def stats_summary() -> Any:
         days = 7
     days = max(1, min(90, days))
     return jsonify(_METRICS.summary(days=days))
+
+
+@app.post("/stats/reset")
+def stats_reset() -> Any:
+    """重置统计数据，从当前时间重新开始监控"""
+    try:
+        result = _METRICS.reset()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.get("/health")
