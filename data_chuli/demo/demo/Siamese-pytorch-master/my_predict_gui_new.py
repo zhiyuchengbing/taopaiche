@@ -1614,12 +1614,18 @@ def _record_metric(
         original_images: Optional[Dict[str, str]] = None,
         input_path1: str = "",
         input_path2: str = "",
+        diff_desc: Optional[str] = None,
+        diff_analyzed_part: Optional[str] = None,
+        ai_diff_ms: Optional[float] = None,
 ) -> Optional[str]:
     """
     记录指标并保存图片
 
     Args:
         original_images: 包含原始图片的字典 {"original1": data_url, "original2": data_url}
+        diff_desc: AI细粒度差异分析描述
+        diff_analyzed_part: 分析的部位
+        ai_diff_ms: 差异分析耗时
 
     Returns:
         record_id if images saved, else None
@@ -1650,6 +1656,14 @@ def _record_metric(
             "note": "",
         }
 
+        # 添加差异分析信息到meta
+        if diff_desc:
+            meta["diff_desc"] = diff_desc
+        if diff_analyzed_part:
+            meta["diff_analyzed_part"] = diff_analyzed_part
+        if ai_diff_ms is not None:
+            meta["ai_diff_ms"] = ai_diff_ms
+
         saved_path = _METRICS.save_images(record_id, previews, meta, original_images)
         if saved_path:
             image_dir = saved_path
@@ -1672,6 +1686,13 @@ def _record_metric(
         ev["image_dir"] = image_dir
         ev["input_path1"] = input_path1
         ev["input_path2"] = input_path2
+        # 添加差异分析信息到日志
+        if diff_desc:
+            ev["diff_desc"] = diff_desc
+        if diff_analyzed_part:
+            ev["diff_analyzed_part"] = diff_analyzed_part
+        if ai_diff_ms is not None:
+            ev["ai_diff_ms"] = ai_diff_ms
 
     _METRICS.record(ev)
     return record_id
@@ -2078,6 +2099,7 @@ def _classify_with_ai_second_judge(
       - 相似度 > 0.8：明确正常，直接判定
       - 相似度 0.3~0.8：不确定区，送入视觉大模型二次鉴别
     第二层：视觉大模型精细鉴别（仅对不确定区的部位调用）
+    第三层（仅异常车辆）：细粒度差异分析，指出具体不一致部位
 
     Args:
         head_prob: 车头相似度
@@ -2086,11 +2108,14 @@ def _classify_with_ai_second_judge(
 
     Returns:
         {
-            "case_type": str,           # 最终分类结果
-            "ai_judge_used": bool,      # 是否调用了AI二次判断
-            "ai_head_result": str|None, # AI车头判断结果
-            "ai_tail_result": str|None,  # AI车尾判断结果
-            "ai_ms": float,             # AI判断耗时(ms)
+            "case_type": str,              # 最终分类结果
+            "ai_judge_used": bool,         # 是否调用了AI二次判断
+            "ai_head_result": str|None,    # AI车头判断结果
+            "ai_tail_result": str|None,    # AI车尾判断结果
+            "ai_ms": float,                # AI判断耗时(ms)
+            "diff_desc": str|None,         # 差异描述（仅异常车辆有）
+            "diff_analyzed_part": str|None, # 分析的部位（head/tail/both）
+            "ai_diff_ms": float,           # 差异分析耗时(ms)
         }
     """
     result: Dict[str, Any] = {
@@ -2099,6 +2124,9 @@ def _classify_with_ai_second_judge(
         "ai_head_result": None,
         "ai_tail_result": None,
         "ai_ms": 0.0,
+        "diff_desc": None,
+        "diff_analyzed_part": None,
+        "ai_diff_ms": 0.0,
     }
 
     if head_prob is None or tail_prob is None:
@@ -2217,6 +2245,79 @@ def _classify_with_ai_second_judge(
         result["case_type"] = "change_trailer"
     else:
         result["case_type"] = "normal"
+
+    # ---- 第三层：仅异常车辆进行细粒度差异分析 ----
+    if result["case_type"] in ("fake_plate", "change_trailer") and _AI_CHECKER is not None:
+        t_diff_start = time.perf_counter()
+        diff_desc_list = []
+        analyzed_parts = []
+
+        try:
+            # 根据异常类型决定分析哪些部位
+            if result["case_type"] == "fake_plate":
+                # 套牌车重点分析车头
+                h1_path = _save_pil_to_temp(cropped_pils.get("h1"), prefix="head1")
+                h2_path = _save_pil_to_temp(cropped_pils.get("h2"), prefix="head2")
+                if h1_path and h2_path:
+                    print(f"[predict] 判定为套牌车，启动车头细粒度差异分析")
+                    head_diff = _AI_CHECKER.analyze_differences(h1_path, h2_path, part_type="head")
+                    if head_diff and not head_diff.startswith("差异分析失败"):
+                        diff_desc_list.append(f"车头: {head_diff}")
+                        analyzed_parts.append("head")
+                    try:
+                        os.remove(h1_path)
+                        os.remove(h2_path)
+                    except Exception:
+                        pass
+
+                # 如果车头Siamese也处于不确定区，顺便分析车尾（可能是换挂套牌）
+                if tail_need_ai or tail_prob < tail_low_th:
+                    t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
+                    t2_path = _save_pil_to_temp(cropped_pils.get("t2"), prefix="tail2")
+                    if t1_path and t2_path:
+                        print(f"[predict] 套牌车车尾也有差异，启动车尾细粒度分析")
+                        tail_diff = _AI_CHECKER.analyze_differences(t1_path, t2_path, part_type="tail")
+                        if tail_diff and not tail_diff.startswith("差异分析失败"):
+                            diff_desc_list.append(f"车尾: {tail_diff}")
+                            analyzed_parts.append("tail")
+                        try:
+                            os.remove(t1_path)
+                            os.remove(t2_path)
+                        except Exception:
+                            pass
+
+            elif result["case_type"] == "change_trailer":
+                # 换挂车重点分析车尾
+                t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
+                t2_path = _save_pil_to_temp(cropped_pils.get("t2"), prefix="tail2")
+                if t1_path and t2_path:
+                    print(f"[predict] 判定为换挂车，启动车尾细粒度差异分析")
+                    tail_diff = _AI_CHECKER.analyze_differences(t1_path, t2_path, part_type="tail")
+                    if tail_diff and not tail_diff.startswith("差异分析失败"):
+                        diff_desc_list.append(f"车尾: {tail_diff}")
+                        analyzed_parts.append("tail")
+                    try:
+                        os.remove(t1_path)
+                        os.remove(t2_path)
+                    except Exception:
+                        pass
+
+            # 组装结果
+            if diff_desc_list:
+                result["diff_desc"] = "; ".join(diff_desc_list)
+                result["diff_analyzed_part"] = "+".join(analyzed_parts) if len(analyzed_parts) > 1 else analyzed_parts[0]
+            else:
+                result["diff_desc"] = None
+                result["diff_analyzed_part"] = None
+
+            result["ai_diff_ms"] = (time.perf_counter() - t_diff_start) * 1000.0
+            print(f"[predict] 差异分析完成，耗时 {result['ai_diff_ms']:.1f}ms，描述: {result.get('diff_desc', 'None')}")
+
+        except Exception as e:
+            print(f"[predict] 差异分析异常: {e}")
+            result["diff_desc"] = None
+            result["diff_analyzed_part"] = None
+            result["ai_diff_ms"] = 0.0
 
     return result
 
@@ -2382,6 +2483,11 @@ def predict() -> Any:
         resp["ai_head_result"] = ai_result["ai_head_result"]
         resp["ai_tail_result"] = ai_result["ai_tail_result"]
         resp["ai_ms"] = round(ai_result["ai_ms"], 1)
+    # 添加细粒度差异分析结果（仅异常车辆）
+    if ai_result.get("diff_desc"):
+        resp["diff_desc"] = ai_result["diff_desc"]
+        resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+        resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
@@ -2402,6 +2508,9 @@ def predict() -> Any:
         original_images=original_images,
         input_path1=path1_input,
         input_path2=path2_input,
+        diff_desc=ai_result.get("diff_desc"),
+        diff_analyzed_part=ai_result.get("diff_analyzed_part"),
+        ai_diff_ms=ai_result.get("ai_diff_ms"),
     )
 
     if record_id:
@@ -2500,6 +2609,11 @@ def predict_preview() -> Any:
         resp["ai_head_result"] = ai_result["ai_head_result"]
         resp["ai_tail_result"] = ai_result["ai_tail_result"]
         resp["ai_ms"] = round(ai_result["ai_ms"], 1)
+    # 添加细粒度差异分析结果（仅异常车辆）
+    if ai_result.get("diff_desc"):
+        resp["diff_desc"] = ai_result["diff_desc"]
+        resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+        resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
@@ -2520,6 +2634,9 @@ def predict_preview() -> Any:
         original_images=original_images,
         input_path1=path1_input,
         input_path2=path2_input,
+        diff_desc=ai_result.get("diff_desc"),
+        diff_analyzed_part=ai_result.get("diff_analyzed_part"),
+        ai_diff_ms=ai_result.get("ai_diff_ms"),
     )
 
     if record_id:
@@ -2616,6 +2733,12 @@ def predict_upload_preview() -> Any:
     file1_name = f1.filename if f1 else "unknown"
     file2_name = f2.filename if f2 else "unknown"
 
+    # 添加细粒度差异分析结果到响应（仅异常车辆）
+    if ai_result.get("diff_desc"):
+        resp["diff_desc"] = ai_result["diff_desc"]
+        resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+        resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
+
     record_id = _record_metric(
         endpoint="/predict_upload_preview",
         source="upload",
@@ -2631,6 +2754,9 @@ def predict_upload_preview() -> Any:
         original_images=original_images,
         input_path1=file1_name,
         input_path2=file2_name,
+        diff_desc=ai_result.get("diff_desc"),
+        diff_analyzed_part=ai_result.get("diff_analyzed_part"),
+        ai_diff_ms=ai_result.get("ai_diff_ms"),
     )
 
     if record_id:
@@ -2723,6 +2849,11 @@ def predict_upload() -> Any:
         resp["ai_head_result"] = ai_result["ai_head_result"]
         resp["ai_tail_result"] = ai_result["ai_tail_result"]
         resp["ai_ms"] = round(ai_result["ai_ms"], 1)
+    # 添加细粒度差异分析结果（仅异常车辆）
+    if ai_result.get("diff_desc"):
+        resp["diff_desc"] = ai_result["diff_desc"]
+        resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+        resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
@@ -2746,6 +2877,9 @@ def predict_upload() -> Any:
         original_images=original_images,
         input_path1=file1_name,
         input_path2=file2_name,
+        diff_desc=ai_result.get("diff_desc"),
+        diff_analyzed_part=ai_result.get("diff_analyzed_part"),
+        ai_diff_ms=ai_result.get("ai_diff_ms"),
     )
 
     if record_id:

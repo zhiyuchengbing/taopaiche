@@ -435,6 +435,130 @@
 
 ---
 
+## 日志系统
+
+### 存储结构
+
+**日志文件位置**
+```
+Siamese-pytorch-master/
+├── stats_logs/                      # 日志根目录
+│   ├── stats_20250413.jsonl        # 每日统计数据（JSONL格式）
+│   ├── stats_20250412.jsonl
+│   ├── stats_20250411.jsonl
+│   ├── protected_records.json       # 受保护记录ID列表
+│   └── images/                      # 图片存储目录
+│       ├── 20250413/
+│       │   └── 20250413_143052_a1b2c3d4/   # 记录ID文件夹
+│       └── 20250412/
+└── exports/                         # 导出目录（自动生成）
+```
+
+### 日志文件格式
+
+**JSONL格式示例（stats_YYYYMMDD.jsonl）**
+```json
+{"endpoint": "/predict", "source": "path", "ok": true, "http_status": 200, "case_type": "normal", "head_prob": 0.91, "tail_prob": 0.88, "lat_ms": 1250.5, "stage_ms": {"validate": 15.2, "open": 45.3, "compute": 980.1, "ai_judge": 210.0}, "record_id": "20250413_143052_a1b2c3d4", "image_dir": "...", "ts": "2025-04-13T14:30:52.123+08:00"}
+{"endpoint": "/predict_upload", "source": "upload", "ok": true, "http_type": "fake_plate", "head_prob": 0.25, "tail_prob": 0.72, "lat_ms": 980.2, "record_id": "20250413_143105_b2c3d4e5", "ts": "2025-04-13T14:31:05.456+08:00"}
+```
+
+**字段说明**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `endpoint` | string | API端点路径 |
+| `source` | string | 请求来源（path/upload/http） |
+| `ok` | boolean | 是否成功 |
+| `http_status` | int | HTTP状态码 |
+| `case_type` | string | 判定结果（normal/fake_plate/change_trailer/abnormal） |
+| `head_prob` | float | 车头相似度 |
+| `tail_prob` | float | 车尾相似度 |
+| `lat_ms` | float | 总耗时（毫秒） |
+| `stage_ms` | object | 分阶段耗时（验证/打开/计算/AI判断） |
+| `record_id` | string | 唯一记录ID（有时表示有图片保存） |
+| `image_dir` | string | 图片存储路径 |
+| `ts` | string | 时间戳（ISO格式） |
+| `ai_judge_used` | boolean | 是否使用AI二次判断 |
+| `ai_ms` | float | AI判断耗时 |
+| `reviewed` | boolean | 是否已复核 |
+| `protected` | boolean | 是否受保护 |
+
+### 图片存储
+
+**每记录自动保存8张图片**
+- `original1.jpg` / `original2.jpg` - 原始上传图片
+- `vehicle1.jpg` / `vehicle2.jpg` - 车辆检测裁切后图片
+- `head1.jpg` / `head2.jpg` - 车头部位裁切图
+- `tail1.jpg` / `tail2.jpg` - 车尾部位裁切图
+
+**元数据文件（meta.json）**
+```json
+{
+  "record_id": "20250413_143052_a1b2c3d4",
+  "ts": "2025-04-13T14:30:52.123+08:00",
+  "case_type": "fake_plate",
+  "head_prob": 0.25,
+  "tail_prob": 0.72,
+  "input_path1": "D:/images/car1.jpg",
+  "input_path2": "D:/images/car2.jpg",
+  "protected": true,
+  "reviewed": true,
+  "reviewed_by": "admin",
+  "reviewed_at": "2025-04-13T15:20:10.000+08:00",
+  "reviewed_case_type": "fake_plate",
+  "review_reason": "确认套牌"
+}
+```
+
+### 数据保留策略
+
+**自动清理规则**
+- 保留期限：默认90天（可配置 `retention_days`）
+- 清理时机：每次写入新日志时触发
+- 清理频率：间隔不少于10分钟
+
+**保护机制**
+| 记录类型 | 清理策略 |
+|----------|----------|
+| `normal`（正常车辆） | 90天后自动删除 |
+| `fake_plate`（套牌车） | 需手动删除或取消保护后清理 |
+| `change_trailer`（换挂车） | 需手动删除或取消保护后清理 |
+| 标记 `protected: true` | 永久保留，不受清理策略影响 |
+
+### 日志查询API
+
+**获取统计快照**
+```bash
+GET /stats
+```
+返回：总请求数、成功率、各端点统计、P95延迟、最近请求列表
+
+**获取最近请求**
+```bash
+GET /stats/recent?n=200
+```
+参数：`n` - 返回条数（默认200）
+
+**获取小时趋势**
+```bash
+GET /stats/summary?days=7
+```
+参数：`days` - 查询天数（1-90，默认7）
+
+**重置统计**
+```bash
+POST /stats/reset
+```
+功能：清空内存中的计数器，从当前时间重新开始统计
+
+### 日志分析用途
+
+1. **性能监控** - 通过 `lat_ms` 和 `stage_ms` 分析各环节耗时
+2. **准确率统计** - 对比 `case_type` 和 `reviewed_case_type` 计算模型准确率
+3. **异常检测** - 监控 `abnormal` 类型和HTTP 500错误
+4. **业务分析** - 按小时/天统计套牌/换挂案件数量趋势
+
+---
+
 ### 当前项目整体进度总结
 
 **核心功能完成度：95%**
