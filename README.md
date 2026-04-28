@@ -586,6 +586,17 @@ POST /stats/reset
 - 局域网访问：`http://{服务器IP}:8001/ui`
 - 仪表板：`http://{服务器IP}:8001/dashboard`
 - 记录管理：`http://{服务器IP}:8001/records`
-11111
+2026-0428
 ---
+
+## 2026-04-28
+
+- **[调整] `my_predict_gui_new.py` 一级分流规则**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：将车辆判定逻辑调整为“车头相似度和车尾相似度均大于 `0.8` 时直接判定为 `normal`”。
+  - **新规则**：
+    - `head_prob > 0.8` 且 `tail_prob > 0.8`：直接判定为 `normal`
+    - `head_prob > 0.8` 且 `tail_prob <= 0.8`：进入车尾二级判断，确认是否为 `change_trailer`
+    - `head_prob <= 0.8`：进入车头二级判断，确认是否为 `fake_plate`
+  - **说明**：本次调整取消了一级阶段“低分直接判异常”的分支，改为仅对“双高”样本直接放行，其余样本按疑似类型进入 AI 二级判断。
 

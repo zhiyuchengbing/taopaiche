@@ -43,6 +43,59 @@ _HEADTAIL_MODEL: Optional[YOLO] = None
 _IMAGE_RESOLVER: Optional[ImagePathResolver] = None
 _AI_CHECKER: Optional[VehicleCheck] = None
 
+_DEFAULT_HEAD_THRESHOLD = float(os.environ.get("HEAD_THRESHOLD_DEFAULT", "0.8"))
+_DEFAULT_TAIL_THRESHOLD = float(os.environ.get("TAIL_THRESHOLD_DEFAULT", "0.8"))
+_THRESHOLDS_FILE = os.path.join(os.path.dirname(__file__), "thresholds.json")
+_THRESHOLD_LOCK = threading.Lock()
+_HEAD_THRESHOLD: float = _DEFAULT_HEAD_THRESHOLD
+_TAIL_THRESHOLD: float = _DEFAULT_TAIL_THRESHOLD
+
+
+def _validate_threshold_value(name: str, value: Any) -> float:
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"{name} must be between 0.0 and 1.0")
+    return threshold
+
+
+def _save_threshold_settings() -> None:
+    payload = {
+        "head_threshold": _HEAD_THRESHOLD,
+        "tail_threshold": _TAIL_THRESHOLD,
+    }
+    with open(_THRESHOLDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _load_threshold_settings() -> None:
+    global _HEAD_THRESHOLD, _TAIL_THRESHOLD
+
+    if not os.path.exists(_THRESHOLDS_FILE):
+        return
+
+    try:
+        with open(_THRESHOLDS_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        _HEAD_THRESHOLD = _validate_threshold_value(
+            "head_threshold",
+            payload.get("head_threshold", _DEFAULT_HEAD_THRESHOLD),
+        )
+        _TAIL_THRESHOLD = _validate_threshold_value(
+            "tail_threshold",
+            payload.get("tail_threshold", _DEFAULT_TAIL_THRESHOLD),
+        )
+    except Exception as e:
+        print(f"[thresholds] failed to load {_THRESHOLDS_FILE}: {e}")
+        _HEAD_THRESHOLD = _DEFAULT_HEAD_THRESHOLD
+        _TAIL_THRESHOLD = _DEFAULT_TAIL_THRESHOLD
+
+
+_load_threshold_settings()
+
 
 class _MetricsStore:
     def __init__(self, *, log_dir: str, retention_days: int = 90, recent_max: int = 300) -> None:
@@ -2076,13 +2129,12 @@ def _classify_case(head_prob: Optional[float], tail_prob: Optional[float]) -> st
     if head_prob is None or tail_prob is None:
         return "abnormal"
 
-    head_low_th = float(os.environ.get("HEAD_LOW_TH", "0.8"))
-    head_same_th = float(os.environ.get("HEAD_SAME_TH", "0.3"))
-    tail_low_th = float(os.environ.get("TAIL_LOW_TH", "0.3"))
+    head_low_th = _HEAD_THRESHOLD
+    tail_low_th = _TAIL_THRESHOLD
 
     if head_prob < head_low_th:
         return "fake_plate"
-    if head_prob > head_same_th and tail_prob <= tail_low_th:
+    if head_prob >= head_low_th and tail_prob <= tail_low_th:
         return "change_trailer"
     return "normal"
 
@@ -2132,58 +2184,31 @@ def _classify_with_ai_second_judge(
     if head_prob is None or tail_prob is None:
         return result
 
-    # 读取阈值配置
-    head_low_th = float(os.environ.get("HEAD_AI_LOW_TH", "0.3"))    # 低于此 → 明确异常
-    head_high_th = float(os.environ.get("HEAD_AI_HIGH_TH", "0.8"))  # 高于此 → 明确正常
-    tail_low_th = float(os.environ.get("TAIL_AI_LOW_TH", "0.3"))    # 低于此 → 明确不同
-    tail_high_th = float(os.environ.get("TAIL_AI_HIGH_TH", "0.8"))  # 高于此 → 明确相同
+    head_direct_normal_th = _HEAD_THRESHOLD
+    tail_direct_normal_th = _TAIL_THRESHOLD
 
-    # ---- 第一层：Siamese快速筛选 ----
-    # 车头判断
-    head_need_ai = head_low_th <= head_prob <= head_high_th
-    if head_prob < head_low_th:
-        head_verdict = "fake_plate"
-    elif head_prob > head_high_th:
-        head_verdict = "normal"
-    else:
-        head_verdict = None  # 不确定，需要AI
+    head_need_ai = False
+    tail_need_ai = False
+    head_verdict: Optional[str] = "normal"
+    tail_verdict: Optional[str] = "same"
 
-    # 车尾判断
-    tail_need_ai = tail_low_th <= tail_prob <= tail_high_th
-    if tail_prob < tail_low_th:
-        tail_verdict = "different"
-    elif tail_prob > tail_high_th:
-        tail_verdict = "same"
-    else:
-        tail_verdict = None  # 不确定，需要AI
-
-    # 如果都不需要AI，直接用第一层结果
-    if not head_need_ai and not tail_need_ai:
-        if head_verdict == "fake_plate":
-            result["case_type"] = "fake_plate"
-        elif head_verdict == "normal" and tail_verdict == "different":
-            result["case_type"] = "change_trailer"
-        else:
-            result["case_type"] = "normal"
+    if head_prob > head_direct_normal_th and tail_prob > tail_direct_normal_th:
+        result["case_type"] = "normal"
         return result
 
-    # ---- 第二层：AI二次鉴别 ----
+    if head_prob > head_direct_normal_th and tail_prob <= tail_direct_normal_th:
+        tail_need_ai = True
+        tail_verdict = None
+    else:
+        head_need_ai = True
+        head_verdict = None
+
     ai_enabled = _ai_second_judge_enabled()
     if not ai_enabled or _AI_CHECKER is None or cropped_pils is None:
-        # AI不可用时，回退到第一层规则
-        if head_verdict == "fake_plate":
+        if head_need_ai:
             result["case_type"] = "fake_plate"
-        elif head_need_ai and head_verdict is None:
-            # 不确定区无AI，保守判定为normal
-            if tail_verdict == "different":
-                result["case_type"] = "change_trailer"
-            else:
-                result["case_type"] = "normal"
-        elif head_verdict == "normal" and (tail_verdict == "different" or tail_need_ai):
-            if tail_verdict == "different":
-                result["case_type"] = "change_trailer"
-            else:
-                result["case_type"] = "normal"
+        elif tail_need_ai or tail_verdict == "different":
+            result["case_type"] = "change_trailer"
         else:
             result["case_type"] = "normal"
         return result
@@ -2202,13 +2227,16 @@ def _classify_with_ai_second_judge(
                 temp_files.append(h2_path)
 
             if h1_path and h2_path:
-                print(f"[predict] 车头相似度 {head_prob:.4f} 在不确定区 [{head_low_th}~{head_high_th}]，启动AI二次鉴别")
+                print(
+                    f"[predict] head similarity {head_prob:.4f} is not greater than "
+                    f"configured threshold {head_direct_normal_th}, running head AI recheck"
+                )
                 ai_head = _AI_CHECKER.check_head(h1_path, h2_path)
                 result["ai_head_result"] = ai_head
-                head_verdict = ai_head  # AI结果覆盖不确定区判定
+                head_verdict = ai_head
             else:
-                print("[predict] 车头裁切图保存失败，回退到规则判断")
-                head_verdict = "normal"  # 保守判定
+                print("[predict] failed to save head crops, keeping fake_plate result")
+                head_verdict = "fake_plate"
 
         if tail_need_ai:
             t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
@@ -2219,13 +2247,16 @@ def _classify_with_ai_second_judge(
                 temp_files.append(t2_path)
 
             if t1_path and t2_path:
-                print(f"[predict] 车尾相似度 {tail_prob:.4f} 在不确定区 [{tail_low_th}~{tail_high_th}]，启动AI二次鉴别")
+                print(
+                    f"[predict] tail similarity {tail_prob:.4f} is not greater than "
+                    f"configured threshold {tail_direct_normal_th}, running tail AI recheck"
+                )
                 ai_tail = _AI_CHECKER.check_tail(t1_path, t2_path)
                 result["ai_tail_result"] = ai_tail
                 tail_verdict = "different" if ai_tail == "change_trailer" else "same"
             else:
-                print("[predict] 车尾裁切图保存失败，回退到规则判断")
-                tail_verdict = "same"  # 保守判定
+                print("[predict] failed to save tail crops, keeping change_trailer result")
+                tail_verdict = "different"
 
     finally:
         # 清理临时文件
@@ -3163,6 +3194,43 @@ def api_review_stats() -> Any:
 def review_stats_page() -> Any:
     """复核统计页面"""
     return render_template("review_stats.html")
+
+
+@app.get("/thresholds")
+def get_thresholds() -> Any:
+    return jsonify({
+        "head_threshold": _HEAD_THRESHOLD,
+        "tail_threshold": _TAIL_THRESHOLD,
+    })
+
+
+@app.post("/thresholds")
+def set_thresholds() -> Any:
+    global _HEAD_THRESHOLD, _TAIL_THRESHOLD
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        head_threshold = payload.get("head_threshold", _HEAD_THRESHOLD)
+        tail_threshold = payload.get("tail_threshold", _TAIL_THRESHOLD)
+
+        new_head_threshold = _validate_threshold_value("head_threshold", head_threshold)
+        new_tail_threshold = _validate_threshold_value("tail_threshold", tail_threshold)
+
+        with _THRESHOLD_LOCK:
+            _HEAD_THRESHOLD = new_head_threshold
+            _TAIL_THRESHOLD = new_tail_threshold
+            _save_threshold_settings()
+
+        return jsonify({
+            "ok": True,
+            "message": "thresholds updated",
+            "head_threshold": _HEAD_THRESHOLD,
+            "tail_threshold": _TAIL_THRESHOLD,
+        })
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to update thresholds: {e}"}), 500
 
 
 if __name__ == "__main__":
