@@ -2191,6 +2191,10 @@ def _classify_with_ai_second_judge(
     tail_need_ai = False
     head_verdict: Optional[str] = "normal"
     tail_verdict: Optional[str] = "same"
+    ai_head_reason: Optional[str] = None
+    ai_tail_reason: Optional[str] = None
+    ai_fallback_reason = "图片质量太差，AI无法判断，维持原结论"
+    ai_invalid = False
 
     if head_prob > head_direct_normal_th and tail_prob > tail_direct_normal_th:
         result["case_type"] = "normal"
@@ -2199,18 +2203,15 @@ def _classify_with_ai_second_judge(
     if head_prob > head_direct_normal_th and tail_prob <= tail_direct_normal_th:
         tail_need_ai = True
         tail_verdict = None
+        stage1_case_type = "change_trailer"
     else:
         head_need_ai = True
         head_verdict = None
+        stage1_case_type = "fake_plate"
 
     ai_enabled = _ai_second_judge_enabled()
     if not ai_enabled or _AI_CHECKER is None or cropped_pils is None:
-        if head_need_ai:
-            result["case_type"] = "fake_plate"
-        elif tail_need_ai or tail_verdict == "different":
-            result["case_type"] = "change_trailer"
-        else:
-            result["case_type"] = "normal"
+        result["case_type"] = stage1_case_type
         return result
 
     t_ai_start = time.perf_counter()
@@ -2231,12 +2232,20 @@ def _classify_with_ai_second_judge(
                     f"[predict] head similarity {head_prob:.4f} is not greater than "
                     f"configured threshold {head_direct_normal_th}, running head AI recheck"
                 )
-                ai_head = _AI_CHECKER.check_head(h1_path, h2_path)
+                ai_head_payload = _AI_CHECKER.check_head_with_reason(h1_path, h2_path)
+                ai_head = str(ai_head_payload.get("label") or "")
+                ai_head_reason = str(ai_head_payload.get("reason") or "").strip()
                 result["ai_head_result"] = ai_head
-                head_verdict = ai_head
+                if ai_head in ("fake_plate", "normal"):
+                    head_verdict = ai_head
+                else:
+                    print(f"[predict] head AI returned invalid result: {ai_head!r}, fallback to stage1")
+                    ai_invalid = True
+                    head_verdict = None
             else:
-                print("[predict] failed to save head crops, keeping fake_plate result")
-                head_verdict = "fake_plate"
+                print("[predict] failed to save head crops, fallback to stage1 result")
+                ai_invalid = True
+                head_verdict = None
 
         if tail_need_ai:
             t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
@@ -2251,12 +2260,20 @@ def _classify_with_ai_second_judge(
                     f"[predict] tail similarity {tail_prob:.4f} is not greater than "
                     f"configured threshold {tail_direct_normal_th}, running tail AI recheck"
                 )
-                ai_tail = _AI_CHECKER.check_tail(t1_path, t2_path)
+                ai_tail_payload = _AI_CHECKER.check_tail_with_reason(t1_path, t2_path)
+                ai_tail = str(ai_tail_payload.get("label") or "")
+                ai_tail_reason = str(ai_tail_payload.get("reason") or "").strip()
                 result["ai_tail_result"] = ai_tail
-                tail_verdict = "different" if ai_tail == "change_trailer" else "same"
+                if ai_tail in ("change_trailer", "normal"):
+                    tail_verdict = "different" if ai_tail == "change_trailer" else "same"
+                else:
+                    print(f"[predict] tail AI returned invalid result: {ai_tail!r}, fallback to stage1")
+                    ai_invalid = True
+                    tail_verdict = None
             else:
-                print("[predict] failed to save tail crops, keeping change_trailer result")
-                tail_verdict = "different"
+                print("[predict] failed to save tail crops, fallback to stage1 result")
+                ai_invalid = True
+                tail_verdict = None
 
     finally:
         # 清理临时文件
@@ -2270,22 +2287,37 @@ def _classify_with_ai_second_judge(
     result["ai_ms"] = (time.perf_counter() - t_ai_start) * 1000.0
 
     # ---- 综合判定 ----
-    if head_verdict == "fake_plate":
+    if ai_invalid:
+        result["case_type"] = stage1_case_type
+        result["diff_desc"] = ai_fallback_reason
+        result["diff_analyzed_part"] = None
+    elif head_verdict == "fake_plate":
         result["case_type"] = "fake_plate"
     elif tail_verdict == "different":
         result["case_type"] = "change_trailer"
     else:
         result["case_type"] = "normal"
 
-    # ---- 第三层：仅异常车辆进行细粒度差异分析 ----
-    if result["case_type"] in ("fake_plate", "change_trailer") and _AI_CHECKER is not None:
+    if result["case_type"] == "normal":
+        normal_reason = ai_head_reason or ai_tail_reason or "AI复核后判为正常"
+        result["diff_desc"] = normal_reason
+        result["diff_analyzed_part"] = None
+        result["ai_diff_ms"] = 0.0
+        return result
+
+    # ---- 第三层：对一阶段异常车辆补充细粒度差异分析 ----
+    if (
+        not ai_invalid
+        and stage1_case_type in ("fake_plate", "change_trailer")
+        and _AI_CHECKER is not None
+    ):
         t_diff_start = time.perf_counter()
         diff_desc_list = []
         analyzed_parts = []
 
         try:
-            # 根据异常类型决定分析哪些部位
-            if result["case_type"] == "fake_plate":
+            # 根据一阶段异常类型决定分析哪些部位
+            if stage1_case_type == "fake_plate":
                 # 套牌车重点分析车头
                 h1_path = _save_pil_to_temp(cropped_pils.get("h1"), prefix="head1")
                 h2_path = _save_pil_to_temp(cropped_pils.get("h2"), prefix="head2")
@@ -2302,7 +2334,7 @@ def _classify_with_ai_second_judge(
                         pass
 
                 # 如果车头Siamese也处于不确定区，顺便分析车尾（可能是换挂套牌）
-                if tail_need_ai or tail_prob < tail_low_th:
+                if tail_need_ai or tail_prob < tail_direct_normal_th:
                     t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
                     t2_path = _save_pil_to_temp(cropped_pils.get("t2"), prefix="tail2")
                     if t1_path and t2_path:
@@ -2317,7 +2349,7 @@ def _classify_with_ai_second_judge(
                         except Exception:
                             pass
 
-            elif result["case_type"] == "change_trailer":
+            elif stage1_case_type == "change_trailer":
                 # 换挂车重点分析车尾
                 t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
                 t2_path = _save_pil_to_temp(cropped_pils.get("t2"), prefix="tail2")
@@ -2337,8 +2369,13 @@ def _classify_with_ai_second_judge(
             if diff_desc_list:
                 result["diff_desc"] = "; ".join(diff_desc_list)
                 result["diff_analyzed_part"] = "+".join(analyzed_parts) if len(analyzed_parts) > 1 else analyzed_parts[0]
+                if result["case_type"] == "normal":
+                    result["diff_desc"] = f"{result['diff_desc']}，AI复核后判为正常"
             else:
-                result["diff_desc"] = None
+                if result["case_type"] == "normal":
+                    result["diff_desc"] = "AI复核后判为正常"
+                else:
+                    result["diff_desc"] = None
                 result["diff_analyzed_part"] = None
 
             result["ai_diff_ms"] = (time.perf_counter() - t_diff_start) * 1000.0
@@ -2346,7 +2383,10 @@ def _classify_with_ai_second_judge(
 
         except Exception as e:
             print(f"[predict] 差异分析异常: {e}")
-            result["diff_desc"] = None
+            if result["case_type"] == "normal":
+                result["diff_desc"] = "AI复核后判为正常"
+            else:
+                result["diff_desc"] = ai_fallback_reason
             result["diff_analyzed_part"] = None
             result["ai_diff_ms"] = 0.0
 

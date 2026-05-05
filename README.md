@@ -1,4 +1,4 @@
-
+﻿
 套牌车识别项目版本管理
  # 日志
  ## 2025-11-12
@@ -600,3 +600,29 @@ POST /stats/reset
     - `head_prob <= 0.8`：进入车头二级判断，确认是否为 `fake_plate`
   - **说明**：本次调整取消了一级阶段“低分直接判异常”的分支，改为仅对“双高”样本直接放行，其余样本按疑似类型进入 AI 二级判断。
 
+## 2026-05-05
+
+- **[修复] `my_predict_gui_new.py` AI 无法判断时回退一阶段判定结果**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：在 `_classify_with_ai_second_judge()` 中新增 `stage1_case_type`，显式保存一阶段判定结果，并在 AI 不可用时直接回退到一阶段结论。
+  - **效果**：当 AI 因图片质量差、输出异常或服务不可用而无法继续判断时，最终 `case_type` 保持与一阶段 Siamese 结果一致。
+
+- **[增强] AI 判定值有效性校验**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：对车头 AI 只接受 `fake_plate/normal`，对车尾 AI 只接受 `change_trailer/normal`；空值或非预期字符串统一视为无效结果。
+  - **效果**：避免异常 AI 输出直接污染最终判定，减少误判和结果漂移。
+
+- **[增强] AI 二次判断返回结构增加理由文本**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：车头与车尾复核从 `check_head/check_tail` 调整为 `check_head_with_reason/check_tail_with_reason`，除标签外同步接收 `reason` 字段。
+  - **效果**：接口和页面可展示更明确的 AI 复核依据，便于人工核查和业务解释。
+
+- **[增强] AI 返回无效值或裁切保存失败时统一按一阶段结果兜底**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：新增 `ai_invalid` 标记；当 AI 返回空值、非预期标签，或临时裁切图保存失败时，统一回退到 `stage1_case_type`。
+  - **效果**：保证最终结果至少与一阶段 Siamese 判断一致，提升异常场景稳定性。
+
+- **[增强] 一阶段异常但 AI 改判正常时保留说明文本**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：将 `diff_desc` 的生成条件从“最终结果为异常”调整为“一阶段曾经判定为异常”；当 AI 复核后最终改判 `normal` 时，保留 `AI复核后判为正常` 或对应 `reason`。
+  - **效果**：页面与接口在“异常改判正常”场景下仍保留复核说明，方便后续复盘。
