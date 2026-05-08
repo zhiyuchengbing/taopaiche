@@ -195,18 +195,28 @@
    - `case_type`：分类结果（见下）
    - `head_prob`：车头相似度（float）
    - `tail_prob`：车尾相似度（float）
+   - `ai_judge_used`：是否触发 AI 二次判断（可选）
+   - `ai_head_result`：AI 对车头的复核结果，取值 `fake_plate/normal`（可选）
+   - `ai_tail_result`：AI 对车尾的复核结果，取值 `change_trailer/normal`（可选）
+   - `ai_ms`：AI 二次判断耗时，毫秒（可选）
+   - `diff_desc`：AI 复核说明或差异描述；一阶段异常但 AI 改判正常时也可能返回（可选）
+   - `diff_analyzed_part`：AI 分析的部位，如 `head`、`tail`、`head+tail`（可选）
+   - `ai_diff_ms`：AI 差异分析耗时，毫秒（可选）
    - `error`：异常信息（可选）
 
  ## 分类规则（`case_type`）
 
  - `abnormal`
-   - 模型初始化失败或推理异常（如文件打不开、模型路径错误等）
+   - 输入校验失败、图片打开失败、模型初始化失败或推理异常时返回。
  - `fake_plate`
-   - `head_prob < HEAD_LOW_TH`（默认 `0.8`）
+   - 一阶段规则：`head_prob <= head_threshold` 时，进入车头 AI 二次复核。
+   - 最终返回条件：车头 AI 复核结果为 `fake_plate`，或 AI 无法有效判断时回退到一阶段 `fake_plate`。
  - `change_trailer`
-   - `head_prob > HEAD_SAME_TH`（默认 `0.3`）且 `tail_prob <= TAIL_LOW_TH`（默认 `0.3`）
+   - 一阶段规则：`head_prob > head_threshold` 且 `tail_prob <= tail_threshold` 时，进入车尾 AI 二次复核。
+   - 最终返回条件：车尾 AI 复核结果为 `change_trailer`，或 AI 无法有效判断时回退到一阶段 `change_trailer`。
  - `normal`
-   - 其余情况
+   - `head_prob > head_threshold` 且 `tail_prob > tail_threshold` 时，直接判定为 `normal`。
+   - 其余进入 AI 复核的样本，如果 AI 最终判为正常，也返回 `normal`。
 
  ## 环境变量配置
 
@@ -232,8 +242,12 @@
  - `PREVIEW_MAX_SIZE`
    - 预览图片最大边长（用于 `/predict_preview` 与 `/predict_upload_preview` 返回的 6 图）
    - 默认：`640`
- - `HEAD_LOW_TH` / `HEAD_SAME_TH` / `TAIL_LOW_TH`
-   - 分类阈值，默认分别为 `0.8 / 0.3 / 0.3`
+ - `HEAD_THRESHOLD_DEFAULT` / `TAIL_THRESHOLD_DEFAULT`
+   - 一阶段直通阈值默认值，默认均为 `0.8`
+ - `AI_SECOND_JUDGE_ENABLED`
+   - 是否启用 AI 二次判断，默认：开启（`1`）
+ - `AI_JUDGE_MODEL`
+   - AI 判断模型名称，默认：`qwen3.5:9b`
 
  ## 启动方式（Windows 示例）
 
@@ -271,323 +285,94 @@
 
 
 
-## 2026-04-13（当前版本）
+## 2026-04-13（当前服务基线）
 
-### 后端服务全面升级（`my_predict_gui_new.py`）
+- **[升级] 当前 Flask 服务主入口切换为 `my_predict_gui_new.py`**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **说明**：当前实际维护的服务入口为 `my_predict_gui_new.py`，接口、日志、记录管理、导出、复核、统计页面均以该文件为准。
 
-**当前系统版本：过磅车辆智能识别系统 v5.0**
+- **[保留] 双阶段判定主链路**
+  - **第一阶段**：先计算 `head_prob`、`tail_prob`
+  - **第二阶段**：非“双高”样本进入 AI 二次判断
+  - **正常直通规则**：`head_prob > head_threshold` 且 `tail_prob > tail_threshold` 时直接返回 `normal`
 
-本次升级实现了完整的生产级后端服务，核心功能包括：
+- **[提供] 完整服务能力**
+  - 接口：`/predict`、`/predict_preview`、`/predict_upload`、`/predict_upload_preview`
+  - 页面：`/ui`、`/dashboard`、`/records`、`/review_stats`
+  - 管理能力：日志、图片留档、导出、人工复核、统计汇总
 
-#### 1. 双层鉴别分类架构
-- **第一层（Siamese快速筛选）**
-  - 车头相似度 < 0.3：明确判定为套牌车
-  - 车头相似度 > 0.8：判定为正常车头
-  - 车尾相似度 < 0.3：判定为换挂车
-  - 车尾相似度 > 0.8：判定为车尾一致
-  
-- **第二层（AI视觉大模型精细鉴别）**
-  - 触发条件：相似度在 0.3~0.8 不确定区间
-  - 模型：Qwen3.5:9b（可配置）
-  - 功能：对车头/车尾分别进行视觉对比判断
-  - 开关：`AI_SECOND_JUDGE_ENABLED`（默认开启）
-  - 耗时：约 500-2000ms（异步处理，不阻塞主流程）
+## 当前服务说明（以 `my_predict_gui_new.py` 为准）
 
-#### 2. 完整的记录管理系统
+### 服务入口
 
-**数据存储结构**
-- 自动保存8张图片/记录：
-  - 2张原始图片（original1.jpg, original2.jpg）
-  - 6张处理后图片（vehicle1/2, head1/2, tail1/2）
-- 元数据存储：JSON格式，包含相似度、判定结果、时间戳等
-- 存储路径：`stats_logs/images/YYYYMMDD/{record_id}/`
+- 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+- 默认地址：`http://127.0.0.1:8001`
 
-**记录管理API**
-- 记录查询：支持按日期范围、类型筛选、分页
-- 单条记录详情：完整元数据+图片访问接口
-- 图片访问：`/api/record/{id}/image/{name}`
-- 批量删除：支持软删除和硬删除两种模式
-
-**数据保护机制**
-- 自动清理策略：
-  - 正常车辆：90天后自动清理
-  - 套牌/换挂车：受保护记录不会被自动清理
-  - 保护标记：可手动设置重要记录为受保护状态
-- 手动删除限制：正常车辆记录不允许手动删除
-
-#### 3. 人工复核系统
-
-**复核功能**
-- 提交复核：`POST /api/record/{id}/review`
-- 撤销复核：`DELETE /api/record/{id}/review`
-- 复核字段：复核类型、复核理由、复核人员、置信度
-- 复核历史：支持多次复核，保留完整历史记录
-- 复核统计：`/api/records/review_stats`
-  - 总记录数、已复核数、复核率
-  - 按类型统计（确认正确/被修正）
-  - 修正流向分析（套牌→正常、正常→换挂等）
-
-**复核页面**
-- 独立页面：`/review_stats`
-- 可视化展示复核统计图表
-
-#### 4. 数据导出系统
-
-**单条导出**
-- 接口：`POST /api/record/{id}/export`
-- 导出内容：图片+元数据+info.txt说明文件
-- 可选图片类型：支持选择导出原始图、裁切图、部件图
-
-**批量导出**
-- 接口：`POST /api/records/batch_export`
-- 分组方式：按类型(case_type)分组或无分组
-- 汇总文件：自动生成 export_summary.csv 和 export_log.txt
-- 图片类型预设：全部、仅原始图、仅处理后、仅车头、仅车尾等
-
-**导出配置**
-- 可用图片类型接口：`GET /api/export/image_types`
-- 支持自定义导出路径
-
-#### 5. 监控统计系统
-
-**实时统计**
-- `/stats`：当前服务状态快照
-  - 服务启动时间、总请求数、成功率
-  - 按端点统计（请求数、错误数、P95延迟）
-  - 各类型案件统计（套牌、换挂、正常）
-  
-- `/stats/recent?n=200`：最近n条请求记录
-- `/stats/summary?days=7`：小时级趋势数据（用于图表）
-
-**仪表板页面**
-- 独立页面：`/dashboard`
-- 可视化展示系统运行状态
-
-#### 6. Web界面（`/ui` 页面功能增强）
-
-**现有功能**
-- 路径预测：支持本地路径和HTTP图片链接
-- 上传预测：支持本地上传两张图片
-- 结果展示：6张预览图可视化+概率进度条
-- 结果下载：JSON/CSV格式
-
-**新增功能**
-- AI判断结果显示：显示是否使用了AI二次判断
-- AI判断耗时：独立显示AI判断耗时
-- 记录ID返回：每次检测生成唯一记录ID
-
-#### 7. 性能优化与稳定性
-
-**并发控制**
-- 模型初始化锁：`_INIT_LOCK`，防止并发初始化
-- 推理管道锁：`_PIPELINE_LOCK`，保证单线程推理（模型线程安全）
-
-**性能监控**
-- 分阶段耗时统计：验证、打开、计算、AI判断
-- P95延迟指标统计
-- 自动记录每条请求的详细耗时
-
-**路径安全**
-- 绝对路径强制校验
-- 白名单目录控制：`ALLOWED_BASE_DIRS`
-- 远程拉取开关：`REMOTE_FETCH_ENABLED`
-
-#### 8. 环境变量配置（新增）
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `AI_SECOND_JUDGE_ENABLED` | 启用AI二次判断 | `1` |
-| `AI_JUDGE_MODEL` | AI判断模型名称 | `qwen3.5:9b` |
-| `HEAD_AI_LOW_TH` | AI车头低阈值 | `0.3` |
-| `HEAD_AI_HIGH_TH` | AI车头高阈值 | `0.8` |
-| `TAIL_AI_LOW_TH` | AI车尾低阈值 | `0.3` |
-| `TAIL_AI_HIGH_TH` | AI车尾高阈值 | `0.8` |
-
-#### 9. API端点汇总
+### 当前接口总览
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/` | GET | 可用端点列表 |
+| `/` | GET | 查看可用端点 |
 | `/health` | GET | 健康检查 |
-| `/ui` | GET | Web界面 |
-| `/dashboard` | GET | 仪表板页面 |
+| `/ui` | GET | 检测前端页面 |
+| `/dashboard` | GET | 统计仪表板 |
 | `/records` | GET | 记录查询页面 |
 | `/review_stats` | GET | 复核统计页面 |
-| `/stats` | GET | 统计快照 |
-| `/stats/recent` | GET | 最近记录 |
-| `/stats/summary` | GET | 小时汇总 |
 | `/predict` | POST | 路径预测 |
-| `/predict_preview` | POST | 路径预测+预览图 |
-| `/predict_upload` | POST | 上传预测 |
-| `/predict_upload_preview` | POST | 上传预测+预览图 |
+| `/predict_preview` | POST | 路径预测并返回预览图 |
+| `/predict_upload` | POST | 上传图片预测 |
+| `/predict_upload_preview` | POST | 上传图片预测并返回预览图 |
+| `/stats` | GET | 服务统计快照 |
+| `/stats/recent` | GET | 最近请求列表 |
+| `/stats/summary` | GET | 小时级汇总 |
+| `/stats/reset` | POST | 重置内存统计 |
 | `/api/records` | GET | 查询记录列表 |
-| `/api/record/{id}` | GET | 单条记录详情 |
+| `/api/record/{id}` | GET | 获取记录详情 |
 | `/api/record/{id}/image/{name}` | GET | 获取记录图片 |
 | `/api/record/{id}` | DELETE | 删除记录 |
 | `/api/records/batch_delete` | POST | 批量删除 |
 | `/api/record/{id}/protect` | POST | 设置保护状态 |
 | `/api/record/{id}/export` | POST | 导出单条记录 |
-| `/api/records/batch_export` | POST | 批量导出 |
-| `/api/export/image_types` | GET | 获取图片类型列表 |
+| `/api/records/batch_export` | POST | 批量导出记录 |
+| `/api/export/image_types` | GET | 获取可导出图片类型 |
 | `/api/record/{id}/review` | POST | 提交复核 |
 | `/api/record/{id}/review` | DELETE | 撤销复核 |
-| `/api/records/review_stats` | GET | 复核统计 |
+| `/api/records/review_stats` | GET | 获取复核统计 |
+| `/thresholds` | GET/POST | 获取或更新阈值 |
 
----
+### 当前判定逻辑
 
-## 日志系统
+#### 1. 两地址模式
 
-### 存储结构
+- 请求只传 `path1/path2`，或上传只传 `file1/file2`
+- 完全沿用原方案：
+  - 先算 `head_prob`、`tail_prob`
+  - 若双高则直接 `normal`
+  - 否则根据一阶段分流进入车头或车尾 AI 二次判断
+  - 最终输出 `normal / fake_plate / change_trailer`
 
-**日志文件位置**
-```
-Siamese-pytorch-master/
-├── stats_logs/                      # 日志根目录
-│   ├── stats_20250413.jsonl        # 每日统计数据（JSONL格式）
-│   ├── stats_20250412.jsonl
-│   ├── stats_20250411.jsonl
-│   ├── protected_records.json       # 受保护记录ID列表
-│   └── images/                      # 图片存储目录
-│       ├── 20250413/
-│       │   └── 20250413_143052_a1b2c3d4/   # 记录ID文件夹
-│       └── 20250412/
-└── exports/                         # 导出目录（自动生成）
-```
+#### 2. 四地址模式
 
-### 日志文件格式
+- 路径模式支持额外传入 `path3/path4`
+- 上传模式支持额外传入 `file3/file4`
+- 前两张仍是主判定图，后两张仅用于“尾部原图二次确认”
+- 当前真实顺序为：
+  1. 先完整执行原方案，得到 `stage1_case_type`
+  2. 仅当原方案结果为 `change_trailer` 时
+  3. 再调用 `qwen_vl/predict_ai_shijiao2.py` 做尾部原图确认
+  4. 若尾部原图确认返回“正常”，最终结果改判为 `normal`
+  5. 若尾部原图确认返回“换挂”，最终保持 `change_trailer`
 
-**JSONL格式示例（stats_YYYYMMDD.jsonl）**
-```json
-{"endpoint": "/predict", "source": "path", "ok": true, "http_status": 200, "case_type": "normal", "head_prob": 0.91, "tail_prob": 0.88, "lat_ms": 1250.5, "stage_ms": {"validate": 15.2, "open": 45.3, "compute": 980.1, "ai_judge": 210.0}, "record_id": "20250413_143052_a1b2c3d4", "image_dir": "...", "ts": "2025-04-13T14:30:52.123+08:00"}
-{"endpoint": "/predict_upload", "source": "upload", "ok": true, "http_type": "fake_plate", "head_prob": 0.25, "tail_prob": 0.72, "lat_ms": 980.2, "record_id": "20250413_143105_b2c3d4e5", "ts": "2025-04-13T14:31:05.456+08:00"}
-```
+#### 3. 尾部原图确认规则
 
-**字段说明**
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `endpoint` | string | API端点路径 |
-| `source` | string | 请求来源（path/upload/http） |
-| `ok` | boolean | 是否成功 |
-| `http_status` | int | HTTP状态码 |
-| `case_type` | string | 判定结果（normal/fake_plate/change_trailer/abnormal） |
-| `head_prob` | float | 车头相似度 |
-| `tail_prob` | float | 车尾相似度 |
-| `lat_ms` | float | 总耗时（毫秒） |
-| `stage_ms` | object | 分阶段耗时（验证/打开/计算/AI判断） |
-| `record_id` | string | 唯一记录ID（有时表示有图片保存） |
-| `image_dir` | string | 图片存储路径 |
-| `ts` | string | 时间戳（ISO格式） |
-| `ai_judge_used` | boolean | 是否使用AI二次判断 |
-| `ai_ms` | float | AI判断耗时 |
-| `reviewed` | boolean | 是否已复核 |
-| `protected` | boolean | 是否受保护 |
-
-### 图片存储
-
-**每记录自动保存8张图片**
-- `original1.jpg` / `original2.jpg` - 原始上传图片
-- `vehicle1.jpg` / `vehicle2.jpg` - 车辆检测裁切后图片
-- `head1.jpg` / `head2.jpg` - 车头部位裁切图
-- `tail1.jpg` / `tail2.jpg` - 车尾部位裁切图
-
-**元数据文件（meta.json）**
-```json
-{
-  "record_id": "20250413_143052_a1b2c3d4",
-  "ts": "2025-04-13T14:30:52.123+08:00",
-  "case_type": "fake_plate",
-  "head_prob": 0.25,
-  "tail_prob": 0.72,
-  "input_path1": "D:/images/car1.jpg",
-  "input_path2": "D:/images/car2.jpg",
-  "protected": true,
-  "reviewed": true,
-  "reviewed_by": "admin",
-  "reviewed_at": "2025-04-13T15:20:10.000+08:00",
-  "reviewed_case_type": "fake_plate",
-  "review_reason": "确认套牌"
-}
-```
-
-### 数据保留策略
-
-**自动清理规则**
-- 保留期限：默认90天（可配置 `retention_days`）
-- 清理时机：每次写入新日志时触发
-- 清理频率：间隔不少于10分钟
-
-**保护机制**
-| 记录类型 | 清理策略 |
-|----------|----------|
-| `normal`（正常车辆） | 90天后自动删除 |
-| `fake_plate`（套牌车） | 需手动删除或取消保护后清理 |
-| `change_trailer`（换挂车） | 需手动删除或取消保护后清理 |
-| 标记 `protected: true` | 永久保留，不受清理策略影响 |
-
-### 日志查询API
-
-**获取统计快照**
-```bash
-GET /stats
-```
-返回：总请求数、成功率、各端点统计、P95延迟、最近请求列表
-
-**获取最近请求**
-```bash
-GET /stats/recent?n=200
-```
-参数：`n` - 返回条数（默认200）
-
-**获取小时趋势**
-```bash
-GET /stats/summary?days=7
-```
-参数：`days` - 查询天数（1-90，默认7）
-
-**重置统计**
-```bash
-POST /stats/reset
-```
-功能：清空内存中的计数器，从当前时间重新开始统计
-
-### 日志分析用途
-
-1. **性能监控** - 通过 `lat_ms` 和 `stage_ms` 分析各环节耗时
-2. **准确率统计** - 对比 `case_type` 和 `reviewed_case_type` 计算模型准确率
-3. **异常检测** - 监控 `abnormal` 类型和HTTP 500错误
-4. **业务分析** - 按小时/天统计套牌/换挂案件数量趋势
-
----
-
-### 当前项目整体进度总结
-
-**核心功能完成度：95%**
-
-| 模块 | 状态 | 说明 |
-|------|------|------|
-| 车辆检测与裁切 | ✅ 完成 | YOLOv8 + 自训权重 best.pt |
-| 车头/车尾识别 | ✅ 完成 | YOLO检测 + Siamese相似度计算 |
-| 套牌判定逻辑 | ✅ 完成 | 双层鉴别：Siamese + AI二次判断 |
-| 后端推理服务 | ✅ 完成 | Flask + 多线程 + 并发控制 |
-| Web管理界面 | ✅ 完成 | 检测界面 + 记录管理 + 仪表板 |
-| 记录管理系统 | ✅ 完成 | 完整CRUD + 图片存储 + 数据保护 |
-| 人工复核系统 | ✅ 完成 | 提交/撤销复核 + 复核统计 |
-| 数据导出系统 | ✅ 完成 | 单条/批量导出 + CSV汇总 |
-| 监控统计系统 | ✅ 完成 | 实时统计 + 趋势分析 |
-| 数据清理策略 | ✅ 完成 | 自动清理 + 保护机制 |
-
-**待完善功能（5%）**
-- 数据库持久化：当前使用JSONL文件存储，可扩展至关系型数据库
-- 分布式部署：当前单机多线程，可扩展至微服务架构
-- 实时告警：异常案件自动通知功能
-
-**系统访问地址**
-- 本地测试：`http://127.0.0.1:8001/ui`
-- 局域网访问：`http://{服务器IP}:8001/ui`
-- 仪表板：`http://{服务器IP}:8001/dashboard`
-- 记录管理：`http://{服务器IP}:8001/records`
-2026-0428
----
+- 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai_shijiao2.py`
+- 类：`TailVehicleCheck`
+- 核心规则：
+  - 只看两张原图中央车辆
+  - 优先比对车号、车身编号、放大号
+  - 编号一致，直接判 `正常`
+  - 编号不一致、单边可见单边缺失、被遮挡、无法互相确认，直接判 `换挂`
+  - 只有在编号无法稳定确认且不能直接下结论时，才补看尾门、栏杆、尾灯、车厢结构等特征
 
 ## 2026-04-28
 
@@ -626,3 +411,363 @@ POST /stats/reset
   - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
   - **变更内容**：将 `diff_desc` 的生成条件从“最终结果为异常”调整为“一阶段曾经判定为异常”；当 AI 复核后最终改判 `normal` 时，保留 `AI复核后判为正常` 或对应 `reason`。
   - **效果**：页面与接口在“异常改判正常”场景下仍保留复核说明，方便后续复盘。
+
+## 2026-05-08
+
+- **[新增] 四地址模式下的尾部原图二次确认方案**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：路径预测接口在保留 `path1/path2` 的基础上，新增可选 `path3/path4`。其中：
+    - 仅传 `path1/path2` 时，仍沿用原有两地址方案；
+    - 同时传入 `path3/path4` 时，进入四地址模式，后两张图仅用于尾部原图复核。
+  - **效果**：兼容旧调用方式，不影响现有两地址业务，同时为换挂复核提供额外视角。
+
+- **[调整] 四地址模式判定顺序改为“原方案先判，原图方案后确认”**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：
+    - 先完整执行原有 Siamese + 车头/车尾 AI 二次判断流程，得到原方案最终结果；
+    - 仅当原方案最终结果为 `change_trailer` 时，才调用 `qwen_vl/predict_ai_shijiao2.py` 中的尾部原图方案，对 `path3/path4` 进行进一步确认；
+    - 若尾部原图复核结果为“正常”，则将最终结果从 `change_trailer` 改判为 `normal`；
+    - 若尾部原图复核结果为“换挂”，则保持 `change_trailer` 不变。
+  - **效果**：新方案不再提前接管尾部分支，而是作为换挂确认器使用，更符合现有业务流程。
+
+- **[新增] 尾部原图 AI 复核脚本**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai_shijiao2.py`
+  - **变更内容**：新增 `TailVehicleCheck`，直接对两张原图中的中央车辆尾部进行比对，优先比较车号/车身编号/放大号，在无法确认时再比对尾门、栏杆、尾灯、车厢结构等稳定特征。
+  - **输出结构**：返回结构化字段，包括 `label`、`reason`、`plate_or_number_consistency`、`structure_consistency`。
+  - **效果**：为四地址模式中的换挂确认提供更明确的尾部业务规则。
+
+- **[增强] 接口返回与日志记录增加“原方案结果/二次确认结果”链路信息**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **新增字段**：
+    - `input_mode`
+    - `tail_ai_mode`
+    - `stage1_case_type`
+    - `tail_second_check_used`
+    - `tail_second_check_result`
+    - `tail_second_check_reason`
+  - **效果**：接口响应、`stats_logs/*.jsonl`、图片目录下的 `meta.json`、导出 `info.txt` 均可追踪“原方案先判什么、尾部原图是否复核、复核后是否改判”。
+
+- **[增强] `/ui` 页面适配两地址/四地址业务模式**
+  - **变更文件**：
+    - `data_chuli/demo/demo/Siamese-pytorch-master/templates/ui.html`
+    - `data_chuli/demo/demo/Siamese-pytorch-master/static/ui.js`
+    - `data_chuli/demo/demo/Siamese-pytorch-master/static/ui.css`
+  - **变更内容**：
+    - 路径预测页面新增 `path3/path4` 输入框；
+    - 前端提交时对 `path3/path4` 做成对校验；
+    - 结果区新增 `input_mode`、`tail_ai_mode` 展示；
+    - 下载 JSON/CSV 时同步写入四地址相关字段。
+  - **效果**：前端与后端业务保持一致，便于现场联调和人工确认本次调用走的是哪条判定链路。
+
+### 2026-05-08 接口使用示例
+
+#### 1. 两地址模式：完全沿用原方案
+
+- **适用场景**：
+  - 只有两张主图；
+  - 不启用尾部原图二次确认；
+  - 行为与历史版本保持一致。
+
+- **请求示例**
+
+```json
+{
+  "path1": "D:\\images\\car_a_1.jpg",
+  "path2": "D:\\images\\car_a_2.jpg"
+}
+```
+
+- **调用接口**
+  - `POST /predict`
+  - `POST /predict_preview`
+  - `POST /predict_upload`
+  - `POST /predict_upload_preview`
+
+- **返回示例**
+
+```json
+{
+  "ok": true,
+  "case_type": "normal",
+  "head_prob": 0.9132,
+  "tail_prob": 0.8741,
+  "input_mode": "2_paths",
+  "tail_ai_mode": "none",
+  "stage1_case_type": "normal",
+  "tail_second_check_used": false,
+  "tail_second_check_result": null,
+  "tail_second_check_reason": null,
+  "diff_desc": null,
+  "diff_analyzed_part": null
+}
+```
+
+- **说明**
+  - `input_mode = "2_paths"`：表示本次只使用前两张图；
+  - `tail_second_check_used = false`：表示没有启用第二种尾部原图确认方案；
+  - 其余判定逻辑与原方案一致。
+
+#### 2. 四地址模式：原方案先判，尾部原图后确认
+
+- **适用场景**：
+  - `path1/path2` 为主图；
+  - `path3/path4` 为额外尾部原图；
+  - 仅当原方案先判为 `change_trailer` 时，才触发尾部原图二次确认。
+
+- **请求示例**
+
+```json
+{
+  "path1": "D:\\images\\main_view_1.jpg",
+  "path2": "D:\\images\\main_view_2.jpg",
+  "path3": "D:\\images\\tail_view_1.jpg",
+  "path4": "D:\\images\\tail_view_2.jpg"
+}
+```
+
+- **调用接口**
+  - `POST /predict`
+  - `POST /predict_preview`
+  - `POST /predict_upload`
+  - `POST /predict_upload_preview`
+
+- **返回示例 A：原方案先判换挂，尾部原图确认后仍为换挂**
+
+```json
+{
+  "ok": true,
+  "case_type": "change_trailer",
+  "head_prob": 0.8924,
+  "tail_prob": 0.4217,
+  "input_mode": "4_paths",
+  "tail_ai_mode": "original_tail_confirm",
+  "stage1_case_type": "change_trailer",
+  "tail_second_check_used": true,
+  "tail_second_check_result": "change_trailer",
+  "tail_second_check_reason": "中央车辆尾部编号无法一致确认，且尾灯与栏杆结构存在明显不一致。",
+  "ai_tail_result": "change_trailer",
+  "diff_desc": "中央车辆尾部编号无法一致确认，且尾灯与栏杆结构存在明显不一致。",
+  "diff_analyzed_part": "tail",
+  "ai_diff_ms": 0.0
+}
+```
+
+- **返回示例 B：原方案先判换挂，尾部原图确认后改判正常**
+
+```json
+{
+  "ok": true,
+  "case_type": "normal",
+  "head_prob": 0.9018,
+  "tail_prob": 0.4675,
+  "input_mode": "4_paths",
+  "tail_ai_mode": "original_tail_confirm",
+  "stage1_case_type": "change_trailer",
+  "tail_second_check_used": true,
+  "tail_second_check_result": "normal",
+  "tail_second_check_reason": "中央车辆尾部放大号一致，结构特征未发现明显差异。",
+  "ai_tail_result": "normal",
+  "diff_desc": null,
+  "diff_analyzed_part": null,
+  "ai_diff_ms": 0.0
+}
+```
+
+#### 3. 上传模式补充说明
+
+- `POST /predict_upload`
+  - 必传：`file1`、`file2`
+  - 可选：`file3`、`file4`
+  - 规则：`file3/file4` 必须成对出现
+
+- `POST /predict_upload_preview`
+  - 规则与 `/predict_upload` 一致
+  - 额外返回 `previews`
+    - `vehicle1`、`vehicle2`
+    - `head1`、`head2`
+    - `tail1`、`tail2`
+
+#### 4. 当前返回字段说明
+
+- `ok`
+  - 是否成功完成本次判定
+  - `true` 表示接口执行成功并得到了业务结论
+  - `false` 一般表示参数错误、图片打开失败或内部异常
+
+- `case_type`
+  - 最终业务结论
+  - `normal`：正常
+  - `fake_plate`：套牌
+  - `change_trailer`：换挂
+  - `abnormal`：异常请求或异常处理结果
+
+- `head_prob`
+  - 前两张主图的车头相似度
+  - 值越高，表示车头越像同一辆车
+
+- `tail_prob`
+  - 前两张主图的车尾相似度
+  - 值越高，表示车尾越像同一辆车
+
+- `input_mode`
+  - `2_paths`：只使用两张输入图
+  - `4_paths`：使用四张输入图，后两张用于尾部原图确认
+
+- `ai_judge_used`
+  - 是否触发过原方案中的 AI 二次判断
+  - 这是“原方案 AI”是否参与，不等同于尾部原图确认是否触发
+
+- `ai_head_result`
+  - 原方案中车头 AI 的复核结果
+  - 常见值：`fake_plate`、`normal`
+  - 未触发时为 `null`
+
+- `ai_tail_result`
+  - 原方案中车尾 AI 的复核结果，或四地址模式下尾部原图确认后的最终尾部结论
+  - 常见值：`change_trailer`、`normal`
+  - 未触发时为 `null`
+
+- `ai_ms`
+  - 原方案 AI 二次判断耗时，单位毫秒
+  - 只统计车头/车尾旧 AI 复核阶段
+
+- `tail_ai_mode`
+  - `none`：未走尾部 AI
+  - `legacy_crop`：走了原有“裁切尾图 + 旧 AI”方案
+  - `original_tail_confirm`：在四地址模式下又走了“尾部原图确认”方案
+
+- `stage1_case_type`
+  - 原方案完整执行后的结果
+  - 这是四地址模式里非常关键的字段
+  - 如果最终被尾部原图改判为 `normal`，这里仍可能保留 `change_trailer`
+
+- `tail_second_check_used`
+  - 是否触发了第二种方法，也就是尾部原图确认
+  - `true` 表示四地址模式下已经执行
+  - `false` 表示未执行
+
+- `tail_second_check_result`
+  - 第二种方法本身给出的结论
+  - 常见值：`change_trailer`、`normal`
+  - 未触发时为 `null`
+
+- `tail_second_check_reason`
+  - 第二种方法给出的中文说明
+  - 主要用于人工核查“为什么判换挂”或“为什么改判正常”
+
+- `diff_desc`
+  - 一句话差异总结
+  - 当最终结论为 `fake_plate` 或 `change_trailer` 时，通常返回具体差异说明
+  - 当最终结论为 `normal` 时，当前代码统一返回 `null`
+
+- `diff_analyzed_part`
+  - 差异分析针对的部位
+  - 常见值：`head`、`tail`、`head+tail`
+  - 正常时通常为 `null`
+
+- `ai_diff_ms`
+  - 差异分析耗时，单位毫秒
+  - 若是尾部原图确认直接给出结论，当前代码一般返回 `0.0`
+
+- `record_id`
+  - 本次请求生成的唯一记录 ID
+  - 可用于后续查询记录、查看图片、导出、人工复核
+
+- `error`
+  - 仅在请求失败或部分处理异常时返回
+
+#### 5. 用户示例返回逐字段解读
+
+针对如下示例：
+
+```json
+{
+  "ai_diff_ms": 0.0,
+  "ai_head_result": null,
+  "ai_judge_used": true,
+  "ai_ms": 28958.9,
+  "ai_tail_result": "change_trailer",
+  "case_type": "change_trailer",
+  "diff_analyzed_part": "tail",
+  "diff_desc": "两张图中车辆的车牌号（桂B·A4886与桂B·W0143）不一致，且车头品牌（CENLYON与东风柳汽）及车身标识均不同，确认为不同车辆。",
+  "head_prob": 0.9989994168281555,
+  "input_mode": "4_paths",
+  "ok": true,
+  "record_id": "20260508_115644_4662c13c",
+  "stage1_case_type": "change_trailer",
+  "tail_ai_mode": "original_tail_confirm",
+  "tail_prob": 0.007520087528973818,
+  "tail_second_check_reason": "两张图中车辆的车牌号（桂B·A4886与桂B·W0143）不一致，且车头品牌（CENLYON与东风柳汽）及车身标识均不同，确认为不同车辆。",
+  "tail_second_check_result": "change_trailer",
+  "tail_second_check_used": true
+}
+```
+
+- `head_prob = 0.9989`
+  - 前两张主图车头非常相似，所以这次不是车头问题
+
+- `tail_prob = 0.0075`
+  - 前两张主图车尾相似度极低，因此原方案会怀疑换挂
+
+- `stage1_case_type = "change_trailer"`
+  - 原方案完整执行后，先给出的结论就是换挂
+
+- `input_mode = "4_paths"`
+  - 这次不是传统两图，而是四图模式
+
+- `tail_second_check_used = true`
+  - 因为原方案先判成了换挂，所以继续触发了尾部原图二次确认
+
+- `tail_ai_mode = "original_tail_confirm"`
+  - 表示最后采用的是新增的“尾部原图确认”链路
+
+- `tail_second_check_result = "change_trailer"`
+  - 第二种方法复核后，仍然判定为换挂
+
+- `tail_second_check_reason`
+  - 第二种方法给出的核心依据
+  - 本例直接指出车牌号、品牌、车身标识不一致
+
+- `case_type = "change_trailer"`
+  - 因为二次确认没有推翻原结论，所以最终结果仍然是换挂
+
+- `diff_desc`
+  - 给前端和接口使用的一句话差异总结
+  - 本例返回的是“哪里不同、为什么判换挂”
+
+- `diff_analyzed_part = "tail"`
+  - 表示这条差异总结是从车尾链路得出的
+
+- `ai_judge_used = true`
+  - 原方案里确实调用了 AI 二次判断
+
+- `ai_head_result = null`
+  - 这次没有走车头 AI 复核
+
+- `ai_tail_result = "change_trailer"`
+  - 当前最终尾部 AI 结论为换挂
+
+- `ai_ms = 28958.9`
+  - 原方案 AI 二次判断耗时约 28.96 秒
+
+- `ai_diff_ms = 0.0`
+  - 这次差异结论直接来自尾部原图确认，没有再单独跑额外差异分析耗时
+
+- `record_id`
+  - 可用于回查本次留档记录、图片与导出结果
+
+#### 6. 日志与留档说明
+
+- 日志目录：`data_chuli/demo/demo/Siamese-pytorch-master/stats_logs/`
+- 每日日志：`stats_YYYYMMDD.jsonl`
+- 图片目录：`stats_logs/images/YYYYMMDD/{record_id}/`
+- 记录元数据会同步保存：
+  - `input_mode`
+  - `tail_ai_mode`
+  - `stage1_case_type`
+  - `tail_second_check_used`
+  - `tail_second_check_result`
+  - `tail_second_check_reason`
+  - `diff_desc`
+  - `diff_analyzed_part`
+  - `ai_diff_ms`

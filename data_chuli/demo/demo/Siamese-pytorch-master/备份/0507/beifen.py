@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import threading
 import urllib.parse
@@ -24,7 +24,6 @@ from ultralytics import YOLO
 from siamese import Siamese
 from data_tran.image_resolver import ImagePathResolver
 from qwen_vl.predict_ai import VehicleCheck
-from qwen_vl.predict_ai_shijiao2 import TailVehicleCheck
 
 parent_dir = os.path.dirname(os.path.dirname(__file__))
 if parent_dir not in sys.path:
@@ -43,7 +42,6 @@ _TAIL_MODEL: Optional[Siamese] = None
 _HEADTAIL_MODEL: Optional[YOLO] = None
 _IMAGE_RESOLVER: Optional[ImagePathResolver] = None
 _AI_CHECKER: Optional[VehicleCheck] = None
-_AI_TAIL_CHECKER: Optional[TailVehicleCheck] = None
 
 _DEFAULT_HEAD_THRESHOLD = float(os.environ.get("HEAD_THRESHOLD_DEFAULT", "0.8"))
 _DEFAULT_TAIL_THRESHOLD = float(os.environ.get("TAIL_THRESHOLD_DEFAULT", "0.8"))
@@ -505,9 +503,9 @@ class _MetricsStore:
                 except Exception:
                     continue
 
-            # 保存原始图片（如果提供）
+            # 保存2张原始图片（如果提供）
             if original_images:
-                for key in ["original1", "original2", "original3", "original4"]:
+                for key in ["original1", "original2"]:
                     data_url = original_images.get(key, "")
                     if not data_url or not data_url.startswith("data:image/"):
                         continue
@@ -1163,12 +1161,6 @@ class RecordExporter:
                 f.write(f"车尾相似度: {record.get('tail_prob', 'N/A')}\n")
                 f.write(f"输入路径1: {record.get('input_path1', '')}\n")
                 f.write(f"输入路径2: {record.get('input_path2', '')}\n")
-                f.write(f"输入路径3: {record.get('input_path3', '')}\n")
-                f.write(f"输入路径4: {record.get('input_path4', '')}\n")
-                f.write(f"输入模式: {record.get('input_mode', '')}\n")
-                f.write(f"尾部AI模式: {record.get('tail_ai_mode', '')}\n")
-                f.write(f"原方案结果: {record.get('stage1_case_type', '')}\n")
-                f.write(f"尾部二次确认: {record.get('tail_second_check_result', '')}\n")
 
                 # 如果有复核信息
                 if record.get('reviewed'):
@@ -1393,12 +1385,6 @@ class RecordExporterLegacy:
                     f.write(f"车尾相似度: {record.get('tail_prob', 'N/A')}\n")
                     f.write(f"输入路径1: {record.get('input_path1', '')}\n")
                     f.write(f"输入路径2: {record.get('input_path2', '')}\n")
-                    f.write(f"输入路径3: {record.get('input_path3', '')}\n")
-                    f.write(f"输入路径4: {record.get('input_path4', '')}\n")
-                    f.write(f"输入模式: {record.get('input_mode', '')}\n")
-                    f.write(f"尾部AI模式: {record.get('tail_ai_mode', '')}\n")
-                    f.write(f"原方案结果: {record.get('stage1_case_type', '')}\n")
-                    f.write(f"尾部二次确认: {record.get('tail_second_check_result', '')}\n")
 
                     # 复核信息
                     if record.get("reviewed", False):
@@ -1510,8 +1496,6 @@ class RecordExporterLegacy:
                     # 无论新旧记录，都尝试复制原始图片（如果还存在的话）
                     input_path1 = record.get("input_path1", "")
                     input_path2 = record.get("input_path2", "")
-                    input_path3 = record.get("input_path3", "")
-                    input_path4 = record.get("input_path4", "")
 
                     if input_path1 and os.path.exists(input_path1):
                         # 如果已经有original1.jpg就不重复复制
@@ -1543,12 +1527,6 @@ class RecordExporterLegacy:
                         f.write(f"车尾相似度: {record.get('tail_prob', 'N/A')}\n")
                         f.write(f"输入路径1: {input_path1}\n")
                         f.write(f"输入路径2: {input_path2}\n")
-                        f.write(f"输入路径3: {input_path3}\n")
-                        f.write(f"输入路径4: {input_path4}\n")
-                        f.write(f"输入模式: {record.get('input_mode', '')}\n")
-                        f.write(f"尾部AI模式: {record.get('tail_ai_mode', '')}\n")
-                        f.write(f"原方案结果: {record.get('stage1_case_type', '')}\n")
-                        f.write(f"尾部二次确认: {record.get('tail_second_check_result', '')}\n")
                         f.write(f"导出图片数: {copied_images}\n")
 
                         # 复核信息
@@ -1634,8 +1612,7 @@ class RecordExporterLegacy:
                 writer = csv.writer(f)
                 writer.writerow([
                     "记录ID", "检测时间", "系统判定", "车头相似度", "车尾相似度",
-                    "是否复核", "复核结果", "复核人员",
-                    "输入路径1", "输入路径2", "输入路径3", "输入路径4", "输入模式", "尾部AI模式"
+                    "是否复核", "复核结果", "复核人员", "输入路径1", "输入路径2"
                 ])
 
                 for record in records:
@@ -1649,11 +1626,7 @@ class RecordExporterLegacy:
                         record.get("reviewed_case_type", ""),
                         record.get("reviewed_by", ""),
                         record.get("input_path1", ""),
-                        record.get("input_path2", ""),
-                        record.get("input_path3", ""),
-                        record.get("input_path4", ""),
-                        record.get("input_mode", ""),
-                        record.get("tail_ai_mode", ""),
+                        record.get("input_path2", "")
                     ])
         except Exception:
             pass
@@ -1694,18 +1667,6 @@ def _record_metric(
         original_images: Optional[Dict[str, str]] = None,
         input_path1: str = "",
         input_path2: str = "",
-        input_path3: str = "",
-        input_path4: str = "",
-        input_mode: str = "",
-        ai_judge_used: bool = False,
-        ai_head_result: Optional[str] = None,
-        ai_tail_result: Optional[str] = None,
-        ai_ms: Optional[float] = None,
-        tail_ai_mode: str = "",
-        stage1_case_type: str = "",
-        tail_second_check_used: bool = False,
-        tail_second_check_result: str = "",
-        tail_second_check_reason: str = "",
         diff_desc: Optional[str] = None,
         diff_analyzed_part: Optional[str] = None,
         ai_diff_ms: Optional[float] = None,
@@ -1740,18 +1701,6 @@ def _record_metric(
             "tail_prob": tail_prob,
             "input_path1": input_path1,
             "input_path2": input_path2,
-            "input_path3": input_path3,
-            "input_path4": input_path4,
-            "input_mode": input_mode,
-            "ai_judge_used": bool(ai_judge_used),
-            "ai_head_result": ai_head_result,
-            "ai_tail_result": ai_tail_result,
-            "ai_ms": ai_ms,
-            "tail_ai_mode": tail_ai_mode,
-            "stage1_case_type": stage1_case_type,
-            "tail_second_check_used": bool(tail_second_check_used),
-            "tail_second_check_result": tail_second_check_result,
-            "tail_second_check_reason": tail_second_check_reason,
             "endpoint": endpoint,
             "source": source,
             "lat_ms": lat_ms,
@@ -1783,25 +1732,13 @@ def _record_metric(
         "lat_ms": float(lat_ms),
         "stage_ms": stage_ms or {},
         "error": error or "",
-        "input_path1": input_path1,
-        "input_path2": input_path2,
-        "input_path3": input_path3,
-        "input_path4": input_path4,
-        "input_mode": input_mode,
-        "ai_judge_used": bool(ai_judge_used),
-        "ai_head_result": ai_head_result,
-        "ai_tail_result": ai_tail_result,
-        "ai_ms": ai_ms,
-        "tail_ai_mode": tail_ai_mode,
-        "stage1_case_type": stage1_case_type,
-        "tail_second_check_used": bool(tail_second_check_used),
-        "tail_second_check_result": tail_second_check_result,
-        "tail_second_check_reason": tail_second_check_reason,
     }
 
     if record_id:
         ev["record_id"] = record_id
         ev["image_dir"] = image_dir
+        ev["input_path1"] = input_path1
+        ev["input_path2"] = input_path2
         # 添加差异分析信息到日志
         if diff_desc:
             ev["diff_desc"] = diff_desc
@@ -1921,7 +1858,7 @@ class VehiclePairPredictor:
 
 
 def _init_models() -> None:
-    global _INITIALIZED, _CROPPER, _HEAD_MODEL, _TAIL_MODEL, _HEADTAIL_MODEL, _IMAGE_RESOLVER, _AI_CHECKER, _AI_TAIL_CHECKER
+    global _INITIALIZED, _CROPPER, _HEAD_MODEL, _TAIL_MODEL, _HEADTAIL_MODEL, _IMAGE_RESOLVER, _AI_CHECKER
     if _INITIALIZED:
         return
     with _INIT_LOCK:
@@ -1930,7 +1867,7 @@ def _init_models() -> None:
 
         head_model_path = os.environ.get(
             "HEAD_MODEL_PATH",
-            r"D:\project\data_chuli\demo\demo\Siamese-pytorch-master\logs\head\0505\best_epoch_weights.pth",
+            r"D:\project\data_chuli\demo\demo\Siamese-pytorch-master\logs\head\0322\best_epoch_weights.pth",
         )
         tail_model_path = os.environ.get(
             "TAIL_MODEL_PATH",
@@ -1954,10 +1891,6 @@ def _init_models() -> None:
             ai_model_name = os.environ.get("AI_JUDGE_MODEL", "qwen3.5:9b")
             _AI_CHECKER = VehicleCheck(model_name=ai_model_name)
             print(f"[predict] AI二次判断已启用, 模型: {ai_model_name}")
-        if ai_enabled and _AI_TAIL_CHECKER is None:
-            tail_ai_model_name = os.environ.get("AI_TAIL_JUDGE_MODEL", os.environ.get("AI_JUDGE_MODEL", "qwen3.5:9b"))
-            _AI_TAIL_CHECKER = TailVehicleCheck(model_name=tail_ai_model_name)
-            print(f"[predict] 尾部原图AI判断已启用, 模型: {tail_ai_model_name}")
 
         _INITIALIZED = True
 
@@ -1977,21 +1910,6 @@ def _save_pil_to_temp(pil_img: Image.Image, prefix: str = "crop") -> Optional[st
         tmp = tempfile.NamedTemporaryFile(suffix=".jpg", prefix=prefix + "_", delete=False)
         img.save(tmp, format="JPEG", quality=95)
         tmp.close()
-        return tmp.name
-    except Exception:
-        return None
-
-
-def _save_upload_file_to_temp(file_storage: Any, prefix: str = "upload") -> Optional[str]:
-    """将上传文件保存到临时文件，返回路径"""
-    try:
-        if file_storage is None:
-            return None
-        file_storage.stream.seek(0)
-        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", prefix=prefix + "_", delete=False)
-        with open(tmp.name, "wb") as f:
-            shutil.copyfileobj(file_storage.stream, f)
-        file_storage.stream.seek(0)
         return tmp.name
     except Exception:
         return None
@@ -2040,34 +1958,6 @@ def _pil_to_original_data_url(pil_img: Image.Image) -> str:
     img.save(buf, format="JPEG", quality=95)  # 使用更高质量
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{b64}"
-
-
-def _load_original_data_url_from_path(path: str) -> Optional[str]:
-    try:
-        if not path or not os.path.exists(path):
-            return None
-        with Image.open(path) as img:
-            return _pil_to_original_data_url(img.copy())
-    except Exception:
-        return None
-
-
-def _append_tail_original_images(
-        original_images: Optional[Dict[str, str]],
-        path3: Optional[str],
-        path4: Optional[str]
-) -> Optional[Dict[str, str]]:
-    if original_images is None:
-        return None
-
-    merged = dict(original_images)
-    original3 = _load_original_data_url_from_path(str(path3 or ""))
-    original4 = _load_original_data_url_from_path(str(path4 or ""))
-    if original3:
-        merged["original3"] = original3
-    if original4:
-        merged["original4"] = original4
-    return merged
 
 
 def _crop_part_from_vehicle_pil(vehicle_image: Image.Image, cls_id: int) -> Image.Image:
@@ -2253,7 +2143,6 @@ def _classify_with_ai_second_judge(
         head_prob: Optional[float],
         tail_prob: Optional[float],
         cropped_pils: Optional[Dict[str, Image.Image]] = None,
-        tail_original_paths: Optional[Tuple[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     两层鉴别分类：
@@ -2279,11 +2168,6 @@ def _classify_with_ai_second_judge(
             "diff_desc": str|None,         # 差异描述（仅异常车辆有）
             "diff_analyzed_part": str|None, # 分析的部位（head/tail/both）
             "ai_diff_ms": float,           # 差异分析耗时(ms)
-            "tail_ai_mode": str,           # none / legacy_crop / original_tail_confirm
-            "stage1_case_type": str|None,  # 原方案最终结果
-            "tail_second_check_used": bool,
-            "tail_second_check_result": str|None,
-            "tail_second_check_reason": str|None,
         }
     """
     result: Dict[str, Any] = {
@@ -2295,11 +2179,6 @@ def _classify_with_ai_second_judge(
         "diff_desc": None,
         "diff_analyzed_part": None,
         "ai_diff_ms": 0.0,
-        "tail_ai_mode": "none",
-        "stage1_case_type": None,
-        "tail_second_check_used": False,
-        "tail_second_check_result": None,
-        "tail_second_check_reason": None,
     }
 
     if head_prob is None or tail_prob is None:
@@ -2310,7 +2189,6 @@ def _classify_with_ai_second_judge(
 
     head_need_ai = False
     tail_need_ai = False
-    use_tail_original_ai = bool(tail_original_paths and tail_original_paths[0] and tail_original_paths[1])
     head_verdict: Optional[str] = "normal"
     tail_verdict: Optional[str] = "same"
     ai_head_reason: Optional[str] = None
@@ -2386,7 +2264,6 @@ def _classify_with_ai_second_judge(
                 ai_tail = str(ai_tail_payload.get("label") or "")
                 ai_tail_reason = str(ai_tail_payload.get("reason") or "").strip()
                 result["ai_tail_result"] = ai_tail
-                result["tail_ai_mode"] = "legacy_crop"
                 if ai_tail in ("change_trailer", "normal"):
                     tail_verdict = "different" if ai_tail == "change_trailer" else "same"
                 else:
@@ -2421,44 +2298,9 @@ def _classify_with_ai_second_judge(
     else:
         result["case_type"] = "normal"
 
-    result["stage1_case_type"] = result["case_type"]
-
-    if (
-        result["case_type"] == "change_trailer"
-        and use_tail_original_ai
-        and _AI_TAIL_CHECKER is not None
-    ):
-        print("[predict] stage1 result is change_trailer, running tail original-image confirmation")
-        result["tail_second_check_used"] = True
-        result["tail_ai_mode"] = "original_tail_confirm"
-        try:
-            ai_tail_payload = _AI_TAIL_CHECKER.check_tail_on_original(
-                tail_original_paths[0],
-                tail_original_paths[1],
-            )
-            ai_tail_label = str(ai_tail_payload.get("label") or "").strip()
-            ai_tail_reason = str(ai_tail_payload.get("reason") or "").strip()
-            result["tail_second_check_reason"] = ai_tail_reason or None
-            if ai_tail_label == "换挂":
-                result["tail_second_check_result"] = "change_trailer"
-                result["diff_desc"] = ai_tail_reason or "尾部原图复核后仍判定为换挂"
-                result["diff_analyzed_part"] = "tail"
-                result["ai_diff_ms"] = 0.0
-                return result
-            if ai_tail_label == "正常":
-                result["tail_second_check_result"] = "normal"
-                result["case_type"] = "normal"
-                result["ai_tail_result"] = "normal"
-                result["diff_desc"] = None
-                result["diff_analyzed_part"] = None
-                result["ai_diff_ms"] = 0.0
-                return result
-            print(f"[predict] tail original-image confirmation returned invalid result: {ai_tail_label!r}")
-        except Exception as e:
-            print(f"[predict] tail original-image confirmation failed: {e}")
-
     if result["case_type"] == "normal":
-        result["diff_desc"] = None
+        normal_reason = ai_head_reason or ai_tail_reason or "AI复核后判为正常"
+        result["diff_desc"] = normal_reason
         result["diff_analyzed_part"] = None
         result["ai_diff_ms"] = 0.0
         return result
@@ -2527,12 +2369,13 @@ def _classify_with_ai_second_judge(
             if diff_desc_list:
                 result["diff_desc"] = "; ".join(diff_desc_list)
                 result["diff_analyzed_part"] = "+".join(analyzed_parts) if len(analyzed_parts) > 1 else analyzed_parts[0]
+                if result["case_type"] == "normal":
+                    result["diff_desc"] = f"{result['diff_desc']}，AI复核后判为正常"
             else:
-                result["diff_desc"] = None
-                result["diff_analyzed_part"] = None
-
-            if result["case_type"] == "normal":
-                result["diff_desc"] = None
+                if result["case_type"] == "normal":
+                    result["diff_desc"] = "AI复核后判为正常"
+                else:
+                    result["diff_desc"] = None
                 result["diff_analyzed_part"] = None
 
             result["ai_diff_ms"] = (time.perf_counter() - t_diff_start) * 1000.0
@@ -2540,10 +2383,10 @@ def _classify_with_ai_second_judge(
 
         except Exception as e:
             print(f"[predict] 差异分析异常: {e}")
-            if result["case_type"] != "normal":
-                result["diff_desc"] = ai_fallback_reason
+            if result["case_type"] == "normal":
+                result["diff_desc"] = "AI复核后判为正常"
             else:
-                result["diff_desc"] = None
+                result["diff_desc"] = ai_fallback_reason
             result["diff_analyzed_part"] = None
             result["ai_diff_ms"] = 0.0
 
@@ -2623,25 +2466,13 @@ def predict() -> Any:
     source = "path"
     path1_input = str(payload.get("path1") or "")
     path2_input = str(payload.get("path2") or "")
-    path3_input = str(payload.get("path3") or "")
-    path4_input = str(payload.get("path4") or "")
-    has_tail_paths = bool(path3_input or path4_input)
-    input_mode = "4_paths" if has_tail_paths else "2_paths"
 
-    if any(_is_http_url(x) for x in (path1_input, path2_input, path3_input, path4_input) if x):
+    if _is_http_url(path1_input) or _is_http_url(path2_input):
         source = "http"
 
     t_validate0 = time.perf_counter()
     ok1, p1 = _validate_image_path(payload.get("path1"))
     ok2, p2 = _validate_image_path(payload.get("path2"))
-    ok3, p3 = True, ""
-    ok4, p4 = True, ""
-    if has_tail_paths and not (path3_input and path4_input):
-        ok3, p3 = False, "path3 and path4 must both be provided"
-        ok4, p4 = False, "path3 and path4 must both be provided"
-    elif path3_input and path4_input:
-        ok3, p3 = _validate_image_path(payload.get("path3"))
-        ok4, p4 = _validate_image_path(payload.get("path4"))
     t_validate_ms = (time.perf_counter() - t_validate0) * 1000.0
     if not ok1:
         lat_ms = (time.perf_counter() - t0) * 1000.0
@@ -2656,11 +2487,6 @@ def predict() -> Any:
             lat_ms=lat_ms,
             stage_ms={"validate": t_validate_ms},
             error=f"path1 invalid: {p1}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": f"path1 invalid: {p1}"}), 400
     if not ok2:
@@ -2676,53 +2502,8 @@ def predict() -> Any:
             lat_ms=lat_ms,
             stage_ms={"validate": t_validate_ms},
             error=f"path2 invalid: {p2}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": f"path2 invalid: {p2}"}), 400
-    if not ok3:
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        _record_metric(
-            endpoint="/predict",
-            source=source,
-            http_status=400,
-            ok=False,
-            case_type="abnormal",
-            head_prob=None,
-            tail_prob=None,
-            lat_ms=lat_ms,
-            stage_ms={"validate": t_validate_ms},
-            error=f"path3 invalid: {p3}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
-        )
-        return jsonify({"ok": False, "error": f"path3 invalid: {p3}"}), 400
-    if not ok4:
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        _record_metric(
-            endpoint="/predict",
-            source=source,
-            http_status=400,
-            ok=False,
-            case_type="abnormal",
-            head_prob=None,
-            tail_prob=None,
-            lat_ms=lat_ms,
-            stage_ms={"validate": t_validate_ms},
-            error=f"path4 invalid: {p4}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
-        )
-        return jsonify({"ok": False, "error": f"path4 invalid: {p4}"}), 400
 
     # 为了保存图片，需要生成预览图
     t_open_ms = 0.0
@@ -2755,24 +2536,11 @@ def predict() -> Any:
                 lat_ms=lat_ms,
                 stage_ms={"validate": t_validate_ms},
                 error=f"processing failed: {e}",
-                input_path1=path1_input,
-                input_path2=path2_input,
-                input_path3=path3_input,
-                input_path4=path4_input,
-                input_mode=input_mode,
             )
             return jsonify({"ok": False, "error": f"processing failed: {e}"}), 500
 
-        if path3_input and path4_input:
-            original_images = _append_tail_original_images(original_images, p3, p4)
-
         # 两层鉴别分类（含AI二次判断）
-        ai_result = _classify_with_ai_second_judge(
-            head_prob,
-            tail_prob,
-            cropped_pils,
-            tail_original_paths=(p3, p4) if path3_input and path4_input else None,
-        )
+        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils)
         case_type = ai_result["case_type"]
 
     resp: Dict[str, Any] = {
@@ -2780,12 +2548,6 @@ def predict() -> Any:
         "case_type": case_type,
         "head_prob": head_prob,
         "tail_prob": tail_prob,
-        "input_mode": input_mode,
-        "tail_ai_mode": ai_result.get("tail_ai_mode", "none"),
-        "stage1_case_type": ai_result.get("stage1_case_type"),
-        "tail_second_check_used": ai_result.get("tail_second_check_used", False),
-        "tail_second_check_result": ai_result.get("tail_second_check_result"),
-        "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
     }
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
@@ -2817,18 +2579,6 @@ def predict() -> Any:
         original_images=original_images,
         input_path1=path1_input,
         input_path2=path2_input,
-        input_path3=path3_input,
-        input_path4=path4_input,
-        input_mode=input_mode,
-        ai_judge_used=bool(ai_result.get("ai_judge_used")),
-        ai_head_result=ai_result.get("ai_head_result"),
-        ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_ms=ai_result.get("ai_ms"),
-        tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
-        stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
-        tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
-        tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
-        tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
@@ -2848,25 +2598,13 @@ def predict_preview() -> Any:
     source = "path"
     path1_input = str(payload.get("path1") or "")
     path2_input = str(payload.get("path2") or "")
-    path3_input = str(payload.get("path3") or "")
-    path4_input = str(payload.get("path4") or "")
-    has_tail_paths = bool(path3_input or path4_input)
-    input_mode = "4_paths" if has_tail_paths else "2_paths"
 
-    if any(_is_http_url(x) for x in (path1_input, path2_input, path3_input, path4_input) if x):
+    if _is_http_url(path1_input) or _is_http_url(path2_input):
         source = "http"
 
     t_validate0 = time.perf_counter()
     ok1, p1 = _validate_image_path(payload.get("path1"))
     ok2, p2 = _validate_image_path(payload.get("path2"))
-    ok3, p3 = True, ""
-    ok4, p4 = True, ""
-    if has_tail_paths and not (path3_input and path4_input):
-        ok3, p3 = False, "path3 and path4 must both be provided"
-        ok4, p4 = False, "path3 and path4 must both be provided"
-    elif path3_input and path4_input:
-        ok3, p3 = _validate_image_path(payload.get("path3"))
-        ok4, p4 = _validate_image_path(payload.get("path4"))
     t_validate_ms = (time.perf_counter() - t_validate0) * 1000.0
     if not ok1:
         lat_ms = (time.perf_counter() - t0) * 1000.0
@@ -2881,11 +2619,6 @@ def predict_preview() -> Any:
             lat_ms=lat_ms,
             stage_ms={"validate": t_validate_ms},
             error=f"path1 invalid: {p1}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": f"path1 invalid: {p1}"}), 400
     if not ok2:
@@ -2901,53 +2634,8 @@ def predict_preview() -> Any:
             lat_ms=lat_ms,
             stage_ms={"validate": t_validate_ms},
             error=f"path2 invalid: {p2}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": f"path2 invalid: {p2}"}), 400
-    if not ok3:
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        _record_metric(
-            endpoint="/predict_preview",
-            source=source,
-            http_status=400,
-            ok=False,
-            case_type="abnormal",
-            head_prob=None,
-            tail_prob=None,
-            lat_ms=lat_ms,
-            stage_ms={"validate": t_validate_ms},
-            error=f"path3 invalid: {p3}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
-        )
-        return jsonify({"ok": False, "error": f"path3 invalid: {p3}"}), 400
-    if not ok4:
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        _record_metric(
-            endpoint="/predict_preview",
-            source=source,
-            http_status=400,
-            ok=False,
-            case_type="abnormal",
-            head_prob=None,
-            tail_prob=None,
-            lat_ms=lat_ms,
-            stage_ms={"validate": t_validate_ms},
-            error=f"path4 invalid: {p4}",
-            input_path1=path1_input,
-            input_path2=path2_input,
-            input_path3=path3_input,
-            input_path4=path4_input,
-            input_mode=input_mode,
-        )
-        return jsonify({"ok": False, "error": f"path4 invalid: {p4}"}), 400
 
     t_open_ms = 0.0
     with _PIPELINE_LOCK:
@@ -2969,11 +2657,6 @@ def predict_preview() -> Any:
                 lat_ms=lat_ms,
                 stage_ms={"validate": t_validate_ms},
                 error=f"failed to open images: {e}",
-                input_path1=path1_input,
-                input_path2=path2_input,
-                input_path3=path3_input,
-                input_path4=path4_input,
-                input_mode=input_mode,
             )
             return jsonify({"ok": False, "error": f"failed to open images: {e}"}), 400
 
@@ -2981,16 +2664,8 @@ def predict_preview() -> Any:
         head_prob, tail_prob, previews, original_images, cropped_pils, err = _compute_probs_and_previews_pil(img1, img2)
         t_compute_ms = (time.perf_counter() - t_compute0) * 1000.0
 
-        if path3_input and path4_input:
-            original_images = _append_tail_original_images(original_images, p3, p4)
-
         # 两层鉴别分类（含AI二次判断）
-        ai_result = _classify_with_ai_second_judge(
-            head_prob,
-            tail_prob,
-            cropped_pils,
-            tail_original_paths=(p3, p4) if path3_input and path4_input else None,
-        )
+        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils)
         case_type = ai_result["case_type"]
 
     resp: Dict[str, Any] = {
@@ -2999,12 +2674,6 @@ def predict_preview() -> Any:
         "head_prob": head_prob,
         "tail_prob": tail_prob,
         "previews": previews or {},
-        "input_mode": input_mode,
-        "tail_ai_mode": ai_result.get("tail_ai_mode", "none"),
-        "stage1_case_type": ai_result.get("stage1_case_type"),
-        "tail_second_check_used": ai_result.get("tail_second_check_used", False),
-        "tail_second_check_result": ai_result.get("tail_second_check_result"),
-        "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
     }
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
@@ -3036,18 +2705,6 @@ def predict_preview() -> Any:
         original_images=original_images,
         input_path1=path1_input,
         input_path2=path2_input,
-        input_path3=path3_input,
-        input_path4=path4_input,
-        input_mode=input_mode,
-        ai_judge_used=bool(ai_result.get("ai_judge_used")),
-        ai_head_result=ai_result.get("ai_head_result"),
-        ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_ms=ai_result.get("ai_ms"),
-        tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
-        stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
-        tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
-        tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
-        tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
@@ -3065,10 +2722,6 @@ def predict_upload_preview() -> Any:
     predictor = VehiclePairPredictor()
     f1 = request.files.get("file1")
     f2 = request.files.get("file2")
-    f3 = request.files.get("file3")
-    f4 = request.files.get("file4")
-    has_tail_files = bool(f3 or f4)
-    input_mode = "4_paths" if has_tail_files else "2_paths"
     if f1 is None:
         lat_ms = (time.perf_counter() - t0) * 1000.0
         _record_metric(
@@ -3082,11 +2735,6 @@ def predict_upload_preview() -> Any:
             lat_ms=lat_ms,
             stage_ms={},
             error="file1 missing",
-            input_path1=f1.filename if f1 else "",
-            input_path2=f2.filename if f2 else "",
-            input_path3=f3.filename if f3 else "",
-            input_path4=f4.filename if f4 else "",
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": "file1 missing"}), 400
     if f2 is None:
@@ -3102,36 +2750,10 @@ def predict_upload_preview() -> Any:
             lat_ms=lat_ms,
             stage_ms={},
             error="file2 missing",
-            input_path1=f1.filename if f1 else "",
-            input_path2=f2.filename if f2 else "",
-            input_path3=f3.filename if f3 else "",
-            input_path4=f4.filename if f4 else "",
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": "file2 missing"}), 400
-    if has_tail_files and not (f3 and f4):
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        _record_metric(
-            endpoint="/predict_upload_preview",
-            source="upload",
-            http_status=400,
-            ok=False,
-            case_type="abnormal",
-            head_prob=None,
-            tail_prob=None,
-            lat_ms=lat_ms,
-            stage_ms={},
-            error="file3 and file4 must both be provided",
-            input_path1=f1.filename if f1 else "",
-            input_path2=f2.filename if f2 else "",
-            input_path3=f3.filename if f3 else "",
-            input_path4=f4.filename if f4 else "",
-            input_mode=input_mode,
-        )
-        return jsonify({"ok": False, "error": "file3 and file4 must both be provided"}), 400
 
     t_open_ms = 0.0
-    temp_tail_paths: List[str] = []
     with _PIPELINE_LOCK:
         try:
             t_open0 = time.perf_counter()
@@ -3151,11 +2773,6 @@ def predict_upload_preview() -> Any:
                 lat_ms=lat_ms,
                 stage_ms={},
                 error=f"failed to open images: {e}",
-                input_path1=f1.filename if f1 else "",
-                input_path2=f2.filename if f2 else "",
-                input_path3=f3.filename if f3 else "",
-                input_path4=f4.filename if f4 else "",
-                input_mode=input_mode,
             )
             return jsonify({"ok": False, "error": f"failed to open images: {e}"}), 400
 
@@ -3164,18 +2781,7 @@ def predict_upload_preview() -> Any:
         t_compute_ms = (time.perf_counter() - t_compute0) * 1000.0
 
         # 两层鉴别分类（含AI二次判断）
-        tail_original_paths = None
-        if f3 and f4:
-            p3 = _save_upload_file_to_temp(f3, prefix="upload_tail3")
-            p4 = _save_upload_file_to_temp(f4, prefix="upload_tail4")
-            if p3:
-                temp_tail_paths.append(p3)
-            if p4:
-                temp_tail_paths.append(p4)
-            if p3 and p4:
-                tail_original_paths = (p3, p4)
-                original_images = _append_tail_original_images(original_images, p3, p4)
-        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils, tail_original_paths=tail_original_paths)
+        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils)
         case_type = ai_result["case_type"]
 
     resp: Dict[str, Any] = {
@@ -3184,12 +2790,6 @@ def predict_upload_preview() -> Any:
         "head_prob": head_prob,
         "tail_prob": tail_prob,
         "previews": previews or {},
-        "input_mode": input_mode,
-        "tail_ai_mode": ai_result.get("tail_ai_mode", "none"),
-        "stage1_case_type": ai_result.get("stage1_case_type"),
-        "tail_second_check_used": ai_result.get("tail_second_check_used", False),
-        "tail_second_check_result": ai_result.get("tail_second_check_result"),
-        "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
     }
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
@@ -3203,8 +2803,6 @@ def predict_upload_preview() -> Any:
     # 保存图片并记录
     file1_name = f1.filename if f1 else "unknown"
     file2_name = f2.filename if f2 else "unknown"
-    file3_name = f3.filename if f3 else ""
-    file4_name = f4.filename if f4 else ""
 
     # 添加细粒度差异分析结果到响应（仅异常车辆）
     if ai_result.get("diff_desc"):
@@ -3227,18 +2825,6 @@ def predict_upload_preview() -> Any:
         original_images=original_images,
         input_path1=file1_name,
         input_path2=file2_name,
-        input_path3=file3_name,
-        input_path4=file4_name,
-        input_mode=input_mode,
-        ai_judge_used=bool(ai_result.get("ai_judge_used")),
-        ai_head_result=ai_result.get("ai_head_result"),
-        ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_ms=ai_result.get("ai_ms"),
-        tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
-        stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
-        tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
-        tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
-        tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
@@ -3246,12 +2832,6 @@ def predict_upload_preview() -> Any:
 
     if record_id:
         resp["record_id"] = record_id
-
-    for temp_path in temp_tail_paths:
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
 
     return jsonify(resp)
 
@@ -3262,10 +2842,6 @@ def predict_upload() -> Any:
     predictor = VehiclePairPredictor()
     f1 = request.files.get("file1")
     f2 = request.files.get("file2")
-    f3 = request.files.get("file3")
-    f4 = request.files.get("file4")
-    has_tail_files = bool(f3 or f4)
-    input_mode = "4_paths" if has_tail_files else "2_paths"
     if f1 is None:
         lat_ms = (time.perf_counter() - t0) * 1000.0
         _record_metric(
@@ -3279,11 +2855,6 @@ def predict_upload() -> Any:
             lat_ms=lat_ms,
             stage_ms={},
             error="file1 missing",
-            input_path1=f1.filename if f1 else "",
-            input_path2=f2.filename if f2 else "",
-            input_path3=f3.filename if f3 else "",
-            input_path4=f4.filename if f4 else "",
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": "file1 missing"}), 400
     if f2 is None:
@@ -3299,38 +2870,12 @@ def predict_upload() -> Any:
             lat_ms=lat_ms,
             stage_ms={},
             error="file2 missing",
-            input_path1=f1.filename if f1 else "",
-            input_path2=f2.filename if f2 else "",
-            input_path3=f3.filename if f3 else "",
-            input_path4=f4.filename if f4 else "",
-            input_mode=input_mode,
         )
         return jsonify({"ok": False, "error": "file2 missing"}), 400
-    if has_tail_files and not (f3 and f4):
-        lat_ms = (time.perf_counter() - t0) * 1000.0
-        _record_metric(
-            endpoint="/predict_upload",
-            source="upload",
-            http_status=400,
-            ok=False,
-            case_type="abnormal",
-            head_prob=None,
-            tail_prob=None,
-            lat_ms=lat_ms,
-            stage_ms={},
-            error="file3 and file4 must both be provided",
-            input_path1=f1.filename if f1 else "",
-            input_path2=f2.filename if f2 else "",
-            input_path3=f3.filename if f3 else "",
-            input_path4=f4.filename if f4 else "",
-            input_mode=input_mode,
-        )
-        return jsonify({"ok": False, "error": "file3 and file4 must both be provided"}), 400
 
     t_open_ms = 0.0
     previews = None
     original_images = None
-    temp_tail_paths: List[str] = []
     with _PIPELINE_LOCK:
         try:
             t_open0 = time.perf_counter()
@@ -3355,29 +2900,13 @@ def predict_upload() -> Any:
                 lat_ms=lat_ms,
                 stage_ms={},
                 error=f"failed to open images: {e}",
-                input_path1=f1.filename if f1 else "",
-                input_path2=f2.filename if f2 else "",
-                input_path3=f3.filename if f3 else "",
-                input_path4=f4.filename if f4 else "",
-                input_mode=input_mode,
             )
             return jsonify({"ok": False, "error": f"failed to open images: {e}"}), 400
 
         t_compute_ms = (time.perf_counter() - t_open0) * 1000.0
 
         # 两层鉴别分类（含AI二次判断）
-        tail_original_paths = None
-        if f3 and f4:
-            p3 = _save_upload_file_to_temp(f3, prefix="upload_tail3")
-            p4 = _save_upload_file_to_temp(f4, prefix="upload_tail4")
-            if p3:
-                temp_tail_paths.append(p3)
-            if p4:
-                temp_tail_paths.append(p4)
-            if p3 and p4:
-                tail_original_paths = (p3, p4)
-                original_images = _append_tail_original_images(original_images, p3, p4)
-        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils, tail_original_paths=tail_original_paths)
+        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils)
         case_type = ai_result["case_type"]
 
     resp: Dict[str, Any] = {
@@ -3385,12 +2914,6 @@ def predict_upload() -> Any:
         "case_type": case_type,
         "head_prob": head_prob,
         "tail_prob": tail_prob,
-        "input_mode": input_mode,
-        "tail_ai_mode": ai_result.get("tail_ai_mode", "none"),
-        "stage1_case_type": ai_result.get("stage1_case_type"),
-        "tail_second_check_used": ai_result.get("tail_second_check_used", False),
-        "tail_second_check_result": ai_result.get("tail_second_check_result"),
-        "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
     }
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
@@ -3409,8 +2932,6 @@ def predict_upload() -> Any:
     # 保存图片并记录
     file1_name = f1.filename if f1 else "unknown"
     file2_name = f2.filename if f2 else "unknown"
-    file3_name = f3.filename if f3 else ""
-    file4_name = f4.filename if f4 else ""
 
     record_id = _record_metric(
         endpoint="/predict_upload",
@@ -3427,18 +2948,6 @@ def predict_upload() -> Any:
         original_images=original_images,
         input_path1=file1_name,
         input_path2=file2_name,
-        input_path3=file3_name,
-        input_path4=file4_name,
-        input_mode=input_mode,
-        ai_judge_used=bool(ai_result.get("ai_judge_used")),
-        ai_head_result=ai_result.get("ai_head_result"),
-        ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_ms=ai_result.get("ai_ms"),
-        tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
-        stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
-        tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
-        tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
-        tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
@@ -3446,12 +2955,6 @@ def predict_upload() -> Any:
 
     if record_id:
         resp["record_id"] = record_id
-
-    for temp_path in temp_tail_paths:
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
 
     return jsonify(resp)
 
@@ -3505,10 +3008,7 @@ def api_get_image(record_id: str, image_name: str) -> Any:
     """获取记录的图片"""
     try:
         # 验证图片名称
-        valid_names = [
-            "original1.jpg", "original2.jpg", "original3.jpg", "original4.jpg",
-            "vehicle1.jpg", "vehicle2.jpg", "head1.jpg", "head2.jpg", "tail1.jpg", "tail2.jpg",
-        ]
+        valid_names = ["vehicle1.jpg", "vehicle2.jpg", "head1.jpg", "head2.jpg", "tail1.jpg", "tail2.jpg"]
         if image_name not in valid_names:
             return jsonify({"error": "无效的图片名称"}), 400
 
@@ -3658,22 +3158,20 @@ def api_get_image_types() -> Any:
         "image_types": [
             {"value": "original1", "label": "原图1", "group": "原始图片"},
             {"value": "original2", "label": "原图2", "group": "原始图片"},
-            {"value": "original3", "label": "尾部原图3", "group": "原始图片"},
-            {"value": "original4", "label": "尾部原图4", "group": "原始图片"},
             {"value": "vehicle1", "label": "车辆1（裁切）", "group": "裁切图片"},
             {"value": "vehicle2", "label": "车辆2（裁切）", "group": "裁切图片"},
             {"value": "head1", "label": "车头1", "group": "部件图片"},
             {"value": "head2", "label": "车头2", "group": "部件图片"},
             {"value": "tail1", "label": "车尾1", "group": "部件图片"},
-            {"value": "tail2", "label": "车尾2", "group": "部件图片"},
+            {"value": "tail2", "label": "车尾2", "group": "部件图片"}
         ],
         "presets": {
-            "all": ["original1", "original2", "original3", "original4", "vehicle1", "vehicle2", "head1", "head2", "tail1", "tail2"],
-            "original_only": ["original1", "original2", "original3", "original4"],
+            "all": ["original1", "original2", "vehicle1", "vehicle2", "head1", "head2", "tail1", "tail2"],
+            "original_only": ["original1", "original2"],
             "processed_only": ["vehicle1", "vehicle2", "head1", "head2", "tail1", "tail2"],
             "head_only": ["head1", "head2"],
             "tail_only": ["tail1", "tail2"],
-            "parts_only": ["head1", "head2", "tail1", "tail2"],
+            "parts_only": ["head1", "head2", "tail1", "tail2"]
         }
     })
 
