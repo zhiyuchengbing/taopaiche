@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import threading
 import urllib.parse
@@ -25,7 +25,6 @@ from siamese import Siamese
 from data_tran.image_resolver import ImagePathResolver
 from qwen_vl.predict_ai import VehicleCheck
 from qwen_vl.predict_ai_shijiao2 import TailVehicleCheck
-from paddle_ocr.ocr_detect import MaxBoxOCR
 
 parent_dir = os.path.dirname(os.path.dirname(__file__))
 if parent_dir not in sys.path:
@@ -45,13 +44,9 @@ _HEADTAIL_MODEL: Optional[YOLO] = None
 _IMAGE_RESOLVER: Optional[ImagePathResolver] = None
 _AI_CHECKER: Optional[VehicleCheck] = None
 _AI_TAIL_CHECKER: Optional[TailVehicleCheck] = None
-_OCR_CHECKER: Optional[MaxBoxOCR] = None
-_OCR_LOCK = threading.Lock()
 
 _DEFAULT_HEAD_THRESHOLD = float(os.environ.get("HEAD_THRESHOLD_DEFAULT", "0.8"))
 _DEFAULT_TAIL_THRESHOLD = float(os.environ.get("TAIL_THRESHOLD_DEFAULT", "0.8"))
-_DIRECT_FAKE_PLATE_HEAD_THRESHOLD = float(os.environ.get("DIRECT_FAKE_PLATE_HEAD_THRESHOLD", "0.1"))
-_HEAD_OCR_MIN_AREA = float(os.environ.get("HEAD_OCR_MIN_AREA", "20000"))
 _THRESHOLDS_FILE = os.path.join(os.path.dirname(__file__), "thresholds.json")
 _THRESHOLD_LOCK = threading.Lock()
 _HEAD_THRESHOLD: float = _DEFAULT_HEAD_THRESHOLD
@@ -82,7 +77,6 @@ def _load_threshold_settings() -> None:
     global _HEAD_THRESHOLD, _TAIL_THRESHOLD
 
     if not os.path.exists(_THRESHOLDS_FILE):
-
         return
 
     try:
@@ -1175,10 +1169,6 @@ class RecordExporter:
                 f.write(f"尾部AI模式: {record.get('tail_ai_mode', '')}\n")
                 f.write(f"原方案结果: {record.get('stage1_case_type', '')}\n")
                 f.write(f"尾部二次确认: {record.get('tail_second_check_result', '')}\n")
-                f.write(f"车头AI依据: {record.get('ai_head_reason', '')}\n")
-                f.write(f"主视角尾部依据: {record.get('ai_tail_reason', '')}\n")
-                f.write(f"尾牌编号一致性: {record.get('tail_number_consistency', '')}\n")
-                f.write(f"尾牌结构一致性: {record.get('tail_structure_consistency', '')}\n")
 
                 # 如果有复核信息
                 if record.get('reviewed'):
@@ -1409,10 +1399,6 @@ class RecordExporterLegacy:
                     f.write(f"尾部AI模式: {record.get('tail_ai_mode', '')}\n")
                     f.write(f"原方案结果: {record.get('stage1_case_type', '')}\n")
                     f.write(f"尾部二次确认: {record.get('tail_second_check_result', '')}\n")
-                    f.write(f"车头AI依据: {record.get('ai_head_reason', '')}\n")
-                    f.write(f"主视角尾部依据: {record.get('ai_tail_reason', '')}\n")
-                    f.write(f"尾牌编号一致性: {record.get('tail_number_consistency', '')}\n")
-                    f.write(f"尾牌结构一致性: {record.get('tail_structure_consistency', '')}\n")
 
                     # 复核信息
                     if record.get("reviewed", False):
@@ -1563,10 +1549,6 @@ class RecordExporterLegacy:
                         f.write(f"尾部AI模式: {record.get('tail_ai_mode', '')}\n")
                         f.write(f"原方案结果: {record.get('stage1_case_type', '')}\n")
                         f.write(f"尾部二次确认: {record.get('tail_second_check_result', '')}\n")
-                        f.write(f"车头AI依据: {record.get('ai_head_reason', '')}\n")
-                        f.write(f"主视角尾部依据: {record.get('ai_tail_reason', '')}\n")
-                        f.write(f"尾牌编号一致性: {record.get('tail_number_consistency', '')}\n")
-                        f.write(f"尾牌结构一致性: {record.get('tail_structure_consistency', '')}\n")
                         f.write(f"导出图片数: {copied_images}\n")
 
                         # 复核信息
@@ -1718,21 +1700,12 @@ def _record_metric(
         ai_judge_used: bool = False,
         ai_head_result: Optional[str] = None,
         ai_tail_result: Optional[str] = None,
-        ai_head_reason: Optional[str] = None,
-        ai_tail_reason: Optional[str] = None,
         ai_ms: Optional[float] = None,
         tail_ai_mode: str = "",
         stage1_case_type: str = "",
         tail_second_check_used: bool = False,
         tail_second_check_result: str = "",
         tail_second_check_reason: str = "",
-        tail_number_consistency: Optional[str] = None,
-        tail_structure_consistency: Optional[str] = None,
-        ocr_used: bool = False,
-        ocr_match: Optional[bool] = None,
-        ocr_text1: Optional[str] = None,
-        ocr_text2: Optional[str] = None,
-        ocr_error: Optional[str] = None,
         diff_desc: Optional[str] = None,
         diff_analyzed_part: Optional[str] = None,
         ai_diff_ms: Optional[float] = None,
@@ -1773,21 +1746,12 @@ def _record_metric(
             "ai_judge_used": bool(ai_judge_used),
             "ai_head_result": ai_head_result,
             "ai_tail_result": ai_tail_result,
-            "ai_head_reason": ai_head_reason,
-            "ai_tail_reason": ai_tail_reason,
             "ai_ms": ai_ms,
             "tail_ai_mode": tail_ai_mode,
             "stage1_case_type": stage1_case_type,
             "tail_second_check_used": bool(tail_second_check_used),
             "tail_second_check_result": tail_second_check_result,
             "tail_second_check_reason": tail_second_check_reason,
-            "tail_number_consistency": tail_number_consistency,
-            "tail_structure_consistency": tail_structure_consistency,
-            "ocr_used": bool(ocr_used),
-            "ocr_match": ocr_match,
-            "ocr_text1": ocr_text1,
-            "ocr_text2": ocr_text2,
-            "ocr_error": ocr_error,
             "endpoint": endpoint,
             "source": source,
             "lat_ms": lat_ms,
@@ -1827,21 +1791,12 @@ def _record_metric(
         "ai_judge_used": bool(ai_judge_used),
         "ai_head_result": ai_head_result,
         "ai_tail_result": ai_tail_result,
-        "ai_head_reason": ai_head_reason,
-        "ai_tail_reason": ai_tail_reason,
         "ai_ms": ai_ms,
         "tail_ai_mode": tail_ai_mode,
         "stage1_case_type": stage1_case_type,
         "tail_second_check_used": bool(tail_second_check_used),
         "tail_second_check_result": tail_second_check_result,
         "tail_second_check_reason": tail_second_check_reason,
-        "tail_number_consistency": tail_number_consistency,
-        "tail_structure_consistency": tail_structure_consistency,
-        "ocr_used": bool(ocr_used),
-        "ocr_match": ocr_match,
-        "ocr_text1": ocr_text1,
-        "ocr_text2": ocr_text2,
-        "ocr_error": ocr_error,
     }
 
     if record_id:
@@ -2013,59 +1968,6 @@ def _ai_second_judge_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
-def _head_ocr_enabled() -> bool:
-    """检查车头OCR预比对是否启用"""
-    raw = str(os.environ.get("HEAD_OCR_PRECHECK_ENABLED", "1")).strip().lower()
-    return raw not in {"0", "false", "no", "off"}
-
-
-def _get_ocr_checker() -> Optional[MaxBoxOCR]:
-    global _OCR_CHECKER
-
-    if not _head_ocr_enabled():
-        return None
-    if _OCR_CHECKER is not None:
-        return _OCR_CHECKER
-
-    with _OCR_LOCK:
-        if _OCR_CHECKER is not None:
-            return _OCR_CHECKER
-        try:
-            _OCR_CHECKER = MaxBoxOCR()
-            print("[predict] 车头OCR预比对已启用")
-        except Exception as e:
-            print(f"[predict] failed to initialize head OCR checker: {e}")
-            _OCR_CHECKER = None
-    return _OCR_CHECKER
-
-
-def _build_classification_result() -> Dict[str, Any]:
-    return {
-        "case_type": "abnormal",
-        "ai_judge_used": False,
-        "ai_head_result": None,
-        "ai_tail_result": None,
-        "ai_head_reason": None,
-        "ai_tail_reason": None,
-        "ai_ms": 0.0,
-        "diff_desc": None,
-        "diff_analyzed_part": None,
-        "ai_diff_ms": 0.0,
-        "tail_ai_mode": "none",
-        "stage1_case_type": None,
-        "tail_second_check_used": False,
-        "tail_second_check_result": None,
-        "tail_second_check_reason": None,
-        "tail_number_consistency": None,
-        "tail_structure_consistency": None,
-        "ocr_used": False,
-        "ocr_match": None,
-        "ocr_text1": None,
-        "ocr_text2": None,
-        "ocr_error": None,
-    }
-
-
 def _save_pil_to_temp(pil_img: Image.Image, prefix: str = "crop") -> Optional[str]:
     """将PIL图片保存到临时文件，返回路径"""
     try:
@@ -2078,85 +1980,6 @@ def _save_pil_to_temp(pil_img: Image.Image, prefix: str = "crop") -> Optional[st
         return tmp.name
     except Exception:
         return None
-
-
-def _run_head_ocr_precheck(cropped_pils: Optional[Dict[str, Image.Image]]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "ocr_used": False,
-        "ocr_match": None,
-        "ocr_text1": None,
-        "ocr_text2": None,
-        "ocr_error": None,
-    }
-
-    checker = _get_ocr_checker()
-    if checker is None:
-        if _head_ocr_enabled():
-            result["ocr_error"] = "ocr checker unavailable"
-        return result
-
-    if not cropped_pils:
-        result["ocr_error"] = "head crops missing"
-        return result
-
-    h1 = cropped_pils.get("h1")
-    h2 = cropped_pils.get("h2")
-    if h1 is None or h2 is None:
-        result["ocr_error"] = "head crops missing"
-        return result
-
-    p1 = _save_pil_to_temp(h1, prefix="ocr_head1")
-    p2 = _save_pil_to_temp(h2, prefix="ocr_head2")
-    temp_files = [p for p in [p1, p2] if p]
-    try:
-        if not p1 or not p2:
-            result["ocr_error"] = "failed to save head crops for ocr"
-            return result
-
-        result["ocr_used"] = True
-        ocr_result1 = checker.get_max_text(p1)
-        ocr_result2 = checker.get_max_text(p2)
-        area1 = float(ocr_result1.get("area") or 0.0) if isinstance(ocr_result1, dict) else 0.0
-        area2 = float(ocr_result2.get("area") or 0.0) if isinstance(ocr_result2, dict) else 0.0
-        if area1 <= _HEAD_OCR_MIN_AREA:
-            ocr_result1 = {"text": "", "score": 0.0, "area": area1}
-        if area2 <= _HEAD_OCR_MIN_AREA:
-            ocr_result2 = {"text": "", "score": 0.0, "area": area2}
-        compare_result = checker.compare_texts(ocr_result1, ocr_result2)
-        text1 = str(compare_result.get("text1") or "").strip()
-        text2 = str(compare_result.get("text2") or "").strip()
-        area1 = ocr_result1.get("area") if isinstance(ocr_result1, dict) else None
-        area2 = ocr_result2.get("area") if isinstance(ocr_result2, dict) else None
-        score1 = ocr_result1.get("score") if isinstance(ocr_result1, dict) else None
-        score2 = ocr_result2.get("score") if isinstance(ocr_result2, dict) else None
-
-        print(
-            "[predict][ocr] "
-            f"text1='{text1}' area1={area1} score1={score1} "
-            f"text2='{text2}' area2={area2} score2={score2} "
-            f"match={compare_result.get('match')} "
-            f"similarity={compare_result.get('similarity')} "
-            f"reason={compare_result.get('reason')}"
-        )
-
-        if not text1 and not text2:
-            result["ocr_match"] = None
-            result["ocr_error"] = "ocr text empty"
-        else:
-            result["ocr_match"] = compare_result.get("match")
-            result["ocr_error"] = None
-        result["ocr_text1"] = text1 or None
-        result["ocr_text2"] = text2 or None
-    except Exception as e:
-        result["ocr_error"] = str(e)
-    finally:
-        for temp_path in temp_files:
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-
-    return result
 
 
 def _save_upload_file_to_temp(file_storage: Any, prefix: str = "upload") -> Optional[str]:
@@ -2435,13 +2258,11 @@ def _classify_with_ai_second_judge(
     """
     两层鉴别分类：
     第一层：Siamese相似度快速筛选
-      - 高于阈值：该部位直接视为正常
-      - 低于阈值：该部位进入AI复核
-    第二层：视觉大模型复核
-      - 车头低阈值时，仅对 1/2 主视角裁切车头做一次AI判断
-      - 车尾低阈值时，同时对 1/2 主视角裁切尾部 和 3/4 尾牌视角原图做双AI判断
-      - 3/4 视角中的号码一致性优先拍板；只有号码无法确认时，才融合两个视角的结构判断
-      - 最终直接复用这两次AI的结构化理由，不再额外调用差异分析AI
+      - 相似度 < 0.3：明确异常，直接判定
+      - 相似度 > 0.8：明确正常，直接判定
+      - 相似度 0.3~0.8：不确定区，送入视觉大模型二次鉴别
+    第二层：视觉大模型精细鉴别（仅对不确定区的部位调用）
+    第三层（仅异常车辆）：细粒度差异分析，指出具体不一致部位
 
     Args:
         head_prob: 车头相似度
@@ -2454,22 +2275,32 @@ def _classify_with_ai_second_judge(
             "ai_judge_used": bool,         # 是否调用了AI二次判断
             "ai_head_result": str|None,    # AI车头判断结果
             "ai_tail_result": str|None,    # AI车尾判断结果
-            "ai_head_reason": str|None,    # AI车头判断依据
-            "ai_tail_reason": str|None,    # AI主视角尾部判断依据
             "ai_ms": float,                # AI判断耗时(ms)
             "diff_desc": str|None,         # 差异描述（仅异常车辆有）
             "diff_analyzed_part": str|None, # 分析的部位（head/tail/both）
             "ai_diff_ms": float,           # 差异分析耗时(ms)
-            "tail_ai_mode": str,           # none / legacy_crop / original_tail_confirm / dual_tail_ai
+            "tail_ai_mode": str,           # none / legacy_crop / original_tail_confirm
             "stage1_case_type": str|None,  # 原方案最终结果
             "tail_second_check_used": bool,
             "tail_second_check_result": str|None,
             "tail_second_check_reason": str|None,
-            "tail_number_consistency": str|None,
-            "tail_structure_consistency": str|None,
         }
     """
-    result: Dict[str, Any] = _build_classification_result()
+    result: Dict[str, Any] = {
+        "case_type": "abnormal",
+        "ai_judge_used": False,
+        "ai_head_result": None,
+        "ai_tail_result": None,
+        "ai_ms": 0.0,
+        "diff_desc": None,
+        "diff_analyzed_part": None,
+        "ai_diff_ms": 0.0,
+        "tail_ai_mode": "none",
+        "stage1_case_type": None,
+        "tail_second_check_used": False,
+        "tail_second_check_result": None,
+        "tail_second_check_reason": None,
+    }
 
     if head_prob is None or tail_prob is None:
         return result
@@ -2484,28 +2315,11 @@ def _classify_with_ai_second_judge(
     tail_verdict: Optional[str] = "same"
     ai_head_reason: Optional[str] = None
     ai_tail_reason: Optional[str] = None
-    tail_crop_label: Optional[str] = None
-    tail_second_label: Optional[str] = None
-    tail_second_reason: Optional[str] = None
-    tail_number_consistency: Optional[str] = None
-    tail_structure_consistency: Optional[str] = None
     ai_fallback_reason = "图片质量太差，AI无法判断，维持原结论"
-    head_ai_invalid = False
-    tail_crop_ai_invalid = False
-    tail_second_ai_invalid = False
+    ai_invalid = False
 
     stage1_case_type = _classify_case(head_prob, tail_prob)
     result["stage1_case_type"] = stage1_case_type
-
-    if head_prob < _DIRECT_FAKE_PLATE_HEAD_THRESHOLD:
-        result["case_type"] = "fake_plate"
-        result["diff_desc"] = "车头相似度过低，直接判定为套牌"
-        result["diff_analyzed_part"] = "head"
-        print(
-            f"[predict] head similarity {head_prob:.4f} is below direct fake-plate "
-            f"threshold {_DIRECT_FAKE_PLATE_HEAD_THRESHOLD}, skipping all AI analysis"
-        )
-        return result
 
     if head_prob > head_direct_normal_th and tail_prob > tail_direct_normal_th:
         result["case_type"] = "normal"
@@ -2547,16 +2361,15 @@ def _classify_with_ai_second_judge(
                 ai_head = str(ai_head_payload.get("label") or "")
                 ai_head_reason = str(ai_head_payload.get("reason") or "").strip()
                 result["ai_head_result"] = ai_head
-                result["ai_head_reason"] = ai_head_reason or None
                 if ai_head in ("fake_plate", "normal"):
                     head_verdict = ai_head
                 else:
                     print(f"[predict] head AI returned invalid result: {ai_head!r}, fallback to stage1")
-                    head_ai_invalid = True
+                    ai_invalid = True
                     head_verdict = None
             else:
                 print("[predict] failed to save head crops, fallback to stage1 result")
-                head_ai_invalid = True
+                ai_invalid = True
                 head_verdict = None
 
         if tail_need_ai:
@@ -2575,19 +2388,17 @@ def _classify_with_ai_second_judge(
                 ai_tail_payload = _AI_CHECKER.check_tail_with_reason(t1_path, t2_path)
                 ai_tail = str(ai_tail_payload.get("label") or "")
                 ai_tail_reason = str(ai_tail_payload.get("reason") or "").strip()
-                tail_crop_label = ai_tail
                 result["ai_tail_result"] = ai_tail
-                result["ai_tail_reason"] = ai_tail_reason or None
                 result["tail_ai_mode"] = "legacy_crop"
                 if ai_tail in ("change_trailer", "normal"):
                     tail_verdict = "different" if ai_tail == "change_trailer" else "same"
                 else:
                     print(f"[predict] tail AI returned invalid result: {ai_tail!r}, fallback to stage1")
-                    tail_crop_ai_invalid = True
+                    ai_invalid = True
                     tail_verdict = None
             else:
                 print("[predict] failed to save tail crops, fallback to stage1 result")
-                tail_crop_ai_invalid = True
+                ai_invalid = True
                 tail_verdict = None
 
     finally:
@@ -2601,76 +2412,6 @@ def _classify_with_ai_second_judge(
     result["ai_judge_used"] = True
     result["ai_ms"] = (time.perf_counter() - t_ai_start) * 1000.0
 
-    if tail_need_ai and use_tail_original_ai and _AI_TAIL_CHECKER is not None:
-        print("[predict] tail similarity is below threshold, running tail original-image confirmation")
-        result["tail_second_check_used"] = True
-        result["tail_ai_mode"] = "dual_tail_ai" if result["tail_ai_mode"] == "legacy_crop" else "original_tail_confirm"
-        try:
-            ai_tail_payload = _AI_TAIL_CHECKER.check_tail_on_original(
-                tail_original_paths[0],
-                tail_original_paths[1],
-            )
-            tail_second_label = str(ai_tail_payload.get("label") or "").strip()
-            tail_second_reason = str(ai_tail_payload.get("reason") or "").strip()
-            tail_number_consistency = str(ai_tail_payload.get("plate_or_number_consistency") or "").strip()
-            tail_structure_consistency = str(ai_tail_payload.get("structure_consistency") or "").strip()
-            result["tail_second_check_reason"] = tail_second_reason or None
-            result["tail_number_consistency"] = tail_number_consistency or None
-            result["tail_structure_consistency"] = tail_structure_consistency or None
-            if tail_second_label == "换挂":
-                result["tail_second_check_result"] = "change_trailer"
-            elif tail_second_label == "正常":
-                result["tail_second_check_result"] = "normal"
-            else:
-                print(f"[predict] tail original-image confirmation returned invalid result: {tail_second_label!r}")
-                tail_second_ai_invalid = True
-        except Exception as e:
-            print(f"[predict] tail original-image confirmation failed: {e}")
-            tail_second_ai_invalid = True
-
-    if tail_need_ai:
-        if tail_number_consistency == "不一致":
-            tail_verdict = "different"
-            if tail_second_reason:
-                ai_tail_reason = tail_second_reason
-        elif tail_number_consistency == "一致":
-            tail_verdict = "same"
-        else:
-            # 号码无法确认时，才综合 1/2 主视角裁切结构 和 3/4 尾牌视角结构
-            crop_structure_verdict: Optional[str] = None
-            second_structure_verdict: Optional[str] = None
-
-            if tail_crop_ai_invalid:
-                crop_structure_verdict = None
-            elif tail_crop_label == "change_trailer":
-                crop_structure_verdict = "different"
-            elif tail_crop_label == "normal":
-                crop_structure_verdict = "same"
-
-            if tail_second_ai_invalid:
-                second_structure_verdict = None
-            elif tail_second_label == "换挂":
-                second_structure_verdict = "different"
-            elif tail_second_label == "正常":
-                second_structure_verdict = "same"
-            elif tail_structure_consistency == "不一致":
-                second_structure_verdict = "different"
-            elif tail_structure_consistency == "一致":
-                second_structure_verdict = "same"
-
-            if crop_structure_verdict == "same" and second_structure_verdict == "same":
-                tail_verdict = "same"
-            elif crop_structure_verdict == "different" or second_structure_verdict == "different":
-                tail_verdict = "different"
-            elif crop_structure_verdict is None and second_structure_verdict is None:
-                tail_verdict = None
-            elif crop_structure_verdict == "same" or second_structure_verdict == "same":
-                tail_verdict = "same"
-            else:
-                tail_verdict = None
-
-    ai_invalid = (head_need_ai and head_verdict is None) or (tail_need_ai and tail_verdict is None)
-
     # ---- 综合判定 ----
     if ai_invalid:
         result["case_type"] = stage1_case_type
@@ -2683,79 +2424,131 @@ def _classify_with_ai_second_judge(
     else:
         result["case_type"] = "normal"
 
+    if (
+        result["case_type"] == "change_trailer"
+        and use_tail_original_ai
+        and _AI_TAIL_CHECKER is not None
+    ):
+        print("[predict] final result is change_trailer, running tail original-image confirmation")
+        result["tail_second_check_used"] = True
+        result["tail_ai_mode"] = "original_tail_confirm"
+        try:
+            ai_tail_payload = _AI_TAIL_CHECKER.check_tail_on_original(
+                tail_original_paths[0],
+                tail_original_paths[1],
+            )
+            ai_tail_label = str(ai_tail_payload.get("label") or "").strip()
+            ai_tail_reason = str(ai_tail_payload.get("reason") or "").strip()
+            result["tail_second_check_reason"] = ai_tail_reason or None
+            if ai_tail_label == "换挂":
+                result["tail_second_check_result"] = "change_trailer"
+                result["diff_desc"] = ai_tail_reason or "尾部原图复核后仍判定为换挂"
+                result["diff_analyzed_part"] = "tail"
+                result["ai_diff_ms"] = 0.0
+                return result
+            if ai_tail_label == "正常":
+                result["tail_second_check_result"] = "normal"
+                result["case_type"] = "normal"
+                result["ai_tail_result"] = "normal"
+                result["diff_desc"] = None
+                result["diff_analyzed_part"] = None
+                result["ai_diff_ms"] = 0.0
+                return result
+            print(f"[predict] tail original-image confirmation returned invalid result: {ai_tail_label!r}")
+        except Exception as e:
+            print(f"[predict] tail original-image confirmation failed: {e}")
+
     if result["case_type"] == "normal":
         result["diff_desc"] = None
         result["diff_analyzed_part"] = None
         result["ai_diff_ms"] = 0.0
         return result
 
-    diff_desc_list: List[str] = []
-    analyzed_parts: List[str] = []
+    # ---- 第三层：对一阶段异常车辆补充细粒度差异分析 ----
+    if (
+        not ai_invalid
+        and stage1_case_type in ("fake_plate", "change_trailer")
+        and _AI_CHECKER is not None
+    ):
+        t_diff_start = time.perf_counter()
+        diff_desc_list = []
+        analyzed_parts = []
 
-    if result["case_type"] == "fake_plate":
-        if ai_head_reason:
-            diff_desc_list.append(ai_head_reason)
-            analyzed_parts.append("head")
-        if tail_need_ai and ai_tail_reason:
-            diff_desc_list.append(ai_tail_reason)
-            analyzed_parts.append("tail")
-    elif result["case_type"] == "change_trailer":
-        if ai_tail_reason:
-            diff_desc_list.append(ai_tail_reason)
-            analyzed_parts.append("tail")
-        if tail_second_reason and tail_second_reason != ai_tail_reason:
-            diff_desc_list.append(tail_second_reason)
-            if "tail" not in analyzed_parts:
-                analyzed_parts.append("tail")
+        try:
+            # 根据一阶段异常类型决定分析哪些部位
+            if stage1_case_type == "fake_plate":
+                # 套牌车重点分析车头
+                h1_path = _save_pil_to_temp(cropped_pils.get("h1"), prefix="head1")
+                h2_path = _save_pil_to_temp(cropped_pils.get("h2"), prefix="head2")
+                if h1_path and h2_path:
+                    print(f"[predict] 判定为套牌车，启动车头细粒度差异分析")
+                    head_diff = _AI_CHECKER.analyze_differences(h1_path, h2_path, part_type="head")
+                    if head_diff and not head_diff.startswith("差异分析失败"):
+                        diff_desc_list.append(f"车头: {head_diff}")
+                        analyzed_parts.append("head")
+                    try:
+                        os.remove(h1_path)
+                        os.remove(h2_path)
+                    except Exception:
+                        pass
 
-    if diff_desc_list:
-        concise_desc = diff_desc_list[0]
-        if len(diff_desc_list) > 1:
-            concise_desc = f"{concise_desc}；另视角结论一致"
-        result["diff_desc"] = concise_desc
-    else:
-        result["diff_desc"] = None
-    if analyzed_parts:
-        uniq_parts = []
-        for part in analyzed_parts:
-            if part not in uniq_parts:
-                uniq_parts.append(part)
-        result["diff_analyzed_part"] = "+".join(uniq_parts) if len(uniq_parts) > 1 else uniq_parts[0]
-    else:
-        result["diff_analyzed_part"] = None
-    result["ai_diff_ms"] = 0.0
+                # 如果车头Siamese也处于不确定区，顺便分析车尾（可能是换挂套牌）
+                if tail_need_ai or tail_prob < tail_direct_normal_th:
+                    t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
+                    t2_path = _save_pil_to_temp(cropped_pils.get("t2"), prefix="tail2")
+                    if t1_path and t2_path:
+                        print(f"[predict] 套牌车车尾也有差异，启动车尾细粒度分析")
+                        tail_diff = _AI_CHECKER.analyze_differences(t1_path, t2_path, part_type="tail")
+                        if tail_diff and not tail_diff.startswith("差异分析失败"):
+                            diff_desc_list.append(f"车尾: {tail_diff}")
+                            analyzed_parts.append("tail")
+                        try:
+                            os.remove(t1_path)
+                            os.remove(t2_path)
+                        except Exception:
+                            pass
+
+            elif stage1_case_type == "change_trailer":
+                # 换挂车重点分析车尾
+                t1_path = _save_pil_to_temp(cropped_pils.get("t1"), prefix="tail1")
+                t2_path = _save_pil_to_temp(cropped_pils.get("t2"), prefix="tail2")
+                if t1_path and t2_path:
+                    print(f"[predict] 判定为换挂车，启动车尾细粒度差异分析")
+                    tail_diff = _AI_CHECKER.analyze_differences(t1_path, t2_path, part_type="tail")
+                    if tail_diff and not tail_diff.startswith("差异分析失败"):
+                        diff_desc_list.append(f"车尾: {tail_diff}")
+                        analyzed_parts.append("tail")
+                    try:
+                        os.remove(t1_path)
+                        os.remove(t2_path)
+                    except Exception:
+                        pass
+
+            # 组装结果
+            if diff_desc_list:
+                result["diff_desc"] = "; ".join(diff_desc_list)
+                result["diff_analyzed_part"] = "+".join(analyzed_parts) if len(analyzed_parts) > 1 else analyzed_parts[0]
+            else:
+                result["diff_desc"] = None
+                result["diff_analyzed_part"] = None
+
+            if result["case_type"] == "normal":
+                result["diff_desc"] = None
+                result["diff_analyzed_part"] = None
+
+            result["ai_diff_ms"] = (time.perf_counter() - t_diff_start) * 1000.0
+            print(f"[predict] 差异分析完成，耗时 {result['ai_diff_ms']:.1f}ms，描述: {result.get('diff_desc', 'None')}")
+
+        except Exception as e:
+            print(f"[predict] 差异分析异常: {e}")
+            if result["case_type"] != "normal":
+                result["diff_desc"] = ai_fallback_reason
+            else:
+                result["diff_desc"] = None
+            result["diff_analyzed_part"] = None
+            result["ai_diff_ms"] = 0.0
 
     return result
-
-
-def _classify_with_head_ocr_precheck(
-        head_prob: Optional[float],
-        tail_prob: Optional[float],
-        cropped_pils: Optional[Dict[str, Image.Image]] = None,
-        tail_original_paths: Optional[Tuple[str, str]] = None,
-) -> Dict[str, Any]:
-    result = _build_classification_result()
-    result["stage1_case_type"] = _classify_case(head_prob, tail_prob)
-
-    ocr_result = _run_head_ocr_precheck(cropped_pils)
-    result.update(ocr_result)
-
-    if ocr_result.get("ocr_match") is False:
-        result["case_type"] = "fake_plate"
-        text1 = ocr_result.get("ocr_text1") or ""
-        text2 = ocr_result.get("ocr_text2") or ""
-        result["diff_desc"] = f"车头OCR不一致，判定为套牌: '{text1}' vs '{text2}'"
-        result["diff_analyzed_part"] = "head"
-        return result
-
-    downstream = _classify_with_ai_second_judge(
-        head_prob,
-        tail_prob,
-        cropped_pils,
-        tail_original_paths=tail_original_paths,
-    )
-    downstream.update(ocr_result)
-    return downstream
 
 
 @app.get("/")
@@ -2973,16 +2766,9 @@ def predict() -> Any:
 
         if path3_input and path4_input:
             original_images = _append_tail_original_images(original_images, p3, p4)
-            if previews is None:
-                previews = {}
-            if original_images:
-                if original_images.get("original3"):
-                    previews["original3"] = original_images.get("original3")
-                if original_images.get("original4"):
-                    previews["original4"] = original_images.get("original4")
 
         # 两层鉴别分类（含AI二次判断）
-        ai_result = _classify_with_head_ocr_precheck(
+        ai_result = _classify_with_ai_second_judge(
             head_prob,
             tail_prob,
             cropped_pils,
@@ -3006,22 +2792,7 @@ def predict() -> Any:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
         resp["ai_tail_result"] = ai_result["ai_tail_result"]
-        resp["ai_head_reason"] = ai_result.get("ai_head_reason")
-        resp["ai_tail_reason"] = ai_result.get("ai_tail_reason")
         resp["ai_ms"] = round(ai_result["ai_ms"], 1)
-    if ai_result.get("tail_number_consistency") is not None:
-        resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
-    if ai_result.get("tail_structure_consistency") is not None:
-        resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     # 添加细粒度差异分析结果（仅异常车辆）
     if ai_result.get("diff_desc"):
         resp["diff_desc"] = ai_result["diff_desc"]
@@ -3053,21 +2824,12 @@ def predict() -> Any:
         ai_judge_used=bool(ai_result.get("ai_judge_used")),
         ai_head_result=ai_result.get("ai_head_result"),
         ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_head_reason=ai_result.get("ai_head_reason"),
-        ai_tail_reason=ai_result.get("ai_tail_reason"),
         ai_ms=ai_result.get("ai_ms"),
         tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
         stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
         tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
         tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
-        tail_number_consistency=ai_result.get("tail_number_consistency"),
-        tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
@@ -3222,16 +2984,9 @@ def predict_preview() -> Any:
 
         if path3_input and path4_input:
             original_images = _append_tail_original_images(original_images, p3, p4)
-            if previews is None:
-                previews = {}
-            if original_images:
-                if original_images.get("original3"):
-                    previews["original3"] = original_images.get("original3")
-                if original_images.get("original4"):
-                    previews["original4"] = original_images.get("original4")
 
         # 两层鉴别分类（含AI二次判断）
-        ai_result = _classify_with_head_ocr_precheck(
+        ai_result = _classify_with_ai_second_judge(
             head_prob,
             tail_prob,
             cropped_pils,
@@ -3256,22 +3011,7 @@ def predict_preview() -> Any:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
         resp["ai_tail_result"] = ai_result["ai_tail_result"]
-        resp["ai_head_reason"] = ai_result.get("ai_head_reason")
-        resp["ai_tail_reason"] = ai_result.get("ai_tail_reason")
         resp["ai_ms"] = round(ai_result["ai_ms"], 1)
-    if ai_result.get("tail_number_consistency") is not None:
-        resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
-    if ai_result.get("tail_structure_consistency") is not None:
-        resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     # 添加细粒度差异分析结果（仅异常车辆）
     if ai_result.get("diff_desc"):
         resp["diff_desc"] = ai_result["diff_desc"]
@@ -3303,21 +3043,12 @@ def predict_preview() -> Any:
         ai_judge_used=bool(ai_result.get("ai_judge_used")),
         ai_head_result=ai_result.get("ai_head_result"),
         ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_head_reason=ai_result.get("ai_head_reason"),
-        ai_tail_reason=ai_result.get("ai_tail_reason"),
         ai_ms=ai_result.get("ai_ms"),
         tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
         stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
         tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
         tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
-        tail_number_consistency=ai_result.get("tail_number_consistency"),
-        tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
@@ -3445,19 +3176,7 @@ def predict_upload_preview() -> Any:
             if p3 and p4:
                 tail_original_paths = (p3, p4)
                 original_images = _append_tail_original_images(original_images, p3, p4)
-                if previews is None:
-                    previews = {}
-                if original_images:
-                    if original_images.get("original3"):
-                        previews["original3"] = original_images.get("original3")
-                    if original_images.get("original4"):
-                        previews["original4"] = original_images.get("original4")
-        ai_result = _classify_with_head_ocr_precheck(
-            head_prob,
-            tail_prob,
-            cropped_pils,
-            tail_original_paths=tail_original_paths,
-        )
+        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils, tail_original_paths=tail_original_paths)
         case_type = ai_result["case_type"]
 
     resp: Dict[str, Any] = {
@@ -3477,22 +3196,7 @@ def predict_upload_preview() -> Any:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
         resp["ai_tail_result"] = ai_result["ai_tail_result"]
-        resp["ai_head_reason"] = ai_result.get("ai_head_reason")
-        resp["ai_tail_reason"] = ai_result.get("ai_tail_reason")
         resp["ai_ms"] = round(ai_result["ai_ms"], 1)
-    if ai_result.get("tail_number_consistency") is not None:
-        resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
-    if ai_result.get("tail_structure_consistency") is not None:
-        resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
@@ -3530,21 +3234,12 @@ def predict_upload_preview() -> Any:
         ai_judge_used=bool(ai_result.get("ai_judge_used")),
         ai_head_result=ai_result.get("ai_head_result"),
         ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_head_reason=ai_result.get("ai_head_reason"),
-        ai_tail_reason=ai_result.get("ai_tail_reason"),
         ai_ms=ai_result.get("ai_ms"),
         tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
         stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
         tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
         tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
-        tail_number_consistency=ai_result.get("tail_number_consistency"),
-        tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
@@ -3683,19 +3378,7 @@ def predict_upload() -> Any:
             if p3 and p4:
                 tail_original_paths = (p3, p4)
                 original_images = _append_tail_original_images(original_images, p3, p4)
-                if previews is None:
-                    previews = {}
-                if original_images:
-                    if original_images.get("original3"):
-                        previews["original3"] = original_images.get("original3")
-                    if original_images.get("original4"):
-                        previews["original4"] = original_images.get("original4")
-        ai_result = _classify_with_head_ocr_precheck(
-            head_prob,
-            tail_prob,
-            cropped_pils,
-            tail_original_paths=tail_original_paths,
-        )
+        ai_result = _classify_with_ai_second_judge(head_prob, tail_prob, cropped_pils, tail_original_paths=tail_original_paths)
         case_type = ai_result["case_type"]
 
     resp: Dict[str, Any] = {
@@ -3714,22 +3397,7 @@ def predict_upload() -> Any:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
         resp["ai_tail_result"] = ai_result["ai_tail_result"]
-        resp["ai_head_reason"] = ai_result.get("ai_head_reason")
-        resp["ai_tail_reason"] = ai_result.get("ai_tail_reason")
         resp["ai_ms"] = round(ai_result["ai_ms"], 1)
-    if ai_result.get("tail_number_consistency") is not None:
-        resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
-    if ai_result.get("tail_structure_consistency") is not None:
-        resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     # 添加细粒度差异分析结果（仅异常车辆）
     if ai_result.get("diff_desc"):
         resp["diff_desc"] = ai_result["diff_desc"]
@@ -3766,21 +3434,12 @@ def predict_upload() -> Any:
         ai_judge_used=bool(ai_result.get("ai_judge_used")),
         ai_head_result=ai_result.get("ai_head_result"),
         ai_tail_result=ai_result.get("ai_tail_result"),
-        ai_head_reason=ai_result.get("ai_head_reason"),
-        ai_tail_reason=ai_result.get("ai_tail_reason"),
         ai_ms=ai_result.get("ai_ms"),
         tail_ai_mode=ai_result.get("tail_ai_mode", "none"),
         stage1_case_type=str(ai_result.get("stage1_case_type") or ""),
         tail_second_check_used=bool(ai_result.get("tail_second_check_used")),
         tail_second_check_result=str(ai_result.get("tail_second_check_result") or ""),
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
-        tail_number_consistency=ai_result.get("tail_number_consistency"),
-        tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
         diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),

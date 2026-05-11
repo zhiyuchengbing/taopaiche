@@ -655,7 +655,7 @@
   - 第二种方法给出的中文说明
   - 主要用于人工核查“为什么判换挂”或“为什么改判正常”
 
-- `diff_desc`
+ - `diff_desc`
   - 一句话差异总结
   - 当最终结论为 `fake_plate` 或 `change_trailer` 时，通常返回具体差异说明
   - 当最终结论为 `normal` 时，当前代码统一返回 `null`
@@ -697,7 +697,7 @@
   "stage1_case_type": "change_trailer",
   "tail_ai_mode": "original_tail_confirm",
   "tail_prob": 0.007520087528973818,
-  "tail_second_check_reason": "两张图中车辆的车牌号（桂B·A4886与桂B·W0143）不一致，且车头品牌（CENLYON与东风柳汽）及车身标识均不同，确认为不同车辆。",
+  "tail_second_check_reason": "两张图中车辆的车牌号（桂B·A4886与桂B·W0143）不一致，。",
   "tail_second_check_result": "change_trailer",
   "tail_second_check_used": true
 }
@@ -771,3 +771,41 @@
   - `diff_desc`
   - `diff_analyzed_part`
   - `ai_diff_ms`
+现有判别逻辑是：系统先用前两张主图做车辆裁切、车头车尾部位裁切，并计算 head_prob 和 tail_prob；如果车头和车尾相似度都高于阈值，就直接判定为 normal，否则进入原有 AI 二次判断，其中车头分支用于判断是否 fake_plate，车尾分支用于判断是否 change_trailer。如果本次是四地址模式，并且原方案最终先判成了 change_trailer，系统才会再使用后两张尾部原图做一次尾部确认：优先比对中央车辆的车号、车身编号、放大号，无法确认时再比对尾门、栏杆、尾灯、车厢结构等特征；如果二次确认仍判换挂，则最终结果保持 change_trailer，如果二次确认判为正常，则最终改判为 normal。
+
+## 2026-05-11
+
+- **[调整] 车头 OCR 预处理链路重构为“先提字、后比对”**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：
+    - 前置 OCR 仅针对 1/2 视角车辆检测后的车头裁切图 `h1/h2` 执行；
+    - 主流程分别调用两次 `MaxBoxOCR.get_max_text()` 提取两张车头图的最大有效文字；
+    - 再调用 `compare_texts()` 比较两边 OCR 文本，不再直接用整段结构体字符串做匹配。
+
+- **[新增] 车头 OCR 置信度与面积双门槛**
+  - **变更文件**：
+    - `data_chuli/demo/demo/Siamese-pytorch-master/paddle_ocr/ocr_detect.py`
+    - `data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：
+    - `get_max_text()` 默认只保留 `score >= 0.6` 的 OCR 候选；
+    - 在候选中选取面积最大的文字；
+    - 主流程新增 `HEAD_OCR_MIN_AREA`，默认值 `20000`；
+    - 仅当 `area > 20000` 时才认为该 OCR 结果有效，否则按“无有效文字”处理。
+
+- **[调整] 车头 OCR 文本比对规则改为字符命中策略**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/paddle_ocr/ocr_detect.py`
+  - **变更内容**：
+    - 长文本要求存在“连续两个字符一致”才允许放行；
+    - 当短文本长度不超过 2 个字符时，只要存在 1 个字符一致即可放行；
+    - 若两边文本完全一致、标准化后一致、易混字符归一后相同，或数字部分一致，也允许放行；
+    - 否则判定为 OCR 不一致。
+
+- **[调整] 空 OCR 结果不再直接拦截为套牌**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：
+    - 若两张车头裁切图都未识别到有效文字，则前置 OCR 不直接判 `fake_plate`；
+    - 这类样本按 “OCR 无法提供有效结论” 处理，继续进入后续判别流程。
+
+- **[增强] 前置 OCR 控制台日志**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：新增终端日志，输出 `text1/text2`、`area1/area2`、`score1/score2`、`match`、`similarity`、`reason`，便于现场排查 OCR 预处理结果。
