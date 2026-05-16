@@ -170,7 +170,7 @@ class MaxBoxOCR:
         result["reason"] = "text_mismatch"
         return result
 
-    def get_max_text(self, img_path, min_score=0.4):
+    def get_max_text(self, img_path, min_score=0.2):
         """
         获取置信度 >= min_score 的最大检测框文字
         """
@@ -267,23 +267,23 @@ class MaxBoxOCR:
 
 if __name__ == "__main__":
 
-    img1 = r"D:\project\data_chuli\demo\demo\Siamese-pytorch-master\exports\export_20260511_175430\fake_plate\20260511_175333_3a5c17a5_fake_plate\vehicle1.jpg"
+    img1 = r"D:\project\data_chuli\demo\demo\Siamese-pytorch-master\exports\export_20260512_174610\fake_plate\20260512_174532_1e80450e_fake_plate\head1.jpg"
 
-    img2 = r"C:\Users\ADMINI~1\AppData\Local\Temp\ocr_head1__yg7lap1.jpg"
+    img2 = r"D:\project\data_chuli\demo\demo\Siamese-pytorch-master\exports\export_20260512_174610\fake_plate\20260512_174532_1e80450e_fake_plate\head2.jpg"
 
     ocr_model = MaxBoxOCR()
 
-    # 双图比对
-    result = ocr_model.compare_images(
-        img1,
-        img2,
-        min_score=0.8
-    )
+    # # 双图比对
+    # result = ocr_model.compare_images(
+    #     img1,
+    #     img2,
+    #     min_score=0.8
+    # )
 
-    print("比对结果:")
-    print(result)
+    # print("比对结果:")
+    # print(result)
 
-    print("\n" + "=" * 50 + "\n")
+    # print("\n" + "=" * 50 + "\n")
 
     # 单图 OCR
     single_result = ocr_model.get_max_text(

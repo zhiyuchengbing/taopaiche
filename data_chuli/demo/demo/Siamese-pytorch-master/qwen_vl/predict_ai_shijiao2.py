@@ -7,10 +7,10 @@ import ollama
 class TailVehicleCheck:
     """
     使用本地 Ollama 直接比较两张原图中中央车辆的尾部，
-    判断是否为“正常”或“换挂”。
+    判断是否为“正常”“换挂”或“无法判断”。
     """
 
-    VALID_LABELS = ["正常", "换挂"]
+    VALID_LABELS = ["正常", "换挂", "无法判断"]
 
     def __init__(self, model_name: str = "gemma4:latest"):
         self.model_name = model_name
@@ -25,11 +25,15 @@ class TailVehicleCheck:
             "2. 只分析这辆车的尾部区域。\n"
             "3. 忽略其他车辆、路面、背景、天气、时间、阴影、反光、灯光、货物和无关干扰。\n\n"
             "判定优先级必须严格遵守：\n"
+            "最高优先级：先检查两张图是否都包含足够的中央车辆尾部有效信息。\n"
+            "- 只有当两张图都能看到中央车辆的明确尾部区域，且至少具备尾部编号信息或可比对的尾部结构特征时，才允许继续做“正常/换挂”判断。\n"
+            "- 如果任意一张图没有拍到中央车辆尾部，或尾部区域过小、过糊、过曝、被遮挡，导致无法形成有效尾部比对，必须直接输出“无法判断”。\n"
+            "- 遇到“无法判断”时，不要勉强输出“正常”或“换挂”；原因中要明确说明尾部视角证据不足，需回退主视角裁切车尾图继续判断。\n\n"
             "第一优先级：先比对中央车辆可见的车号、车身编号、放大号等尾部编号信息。\n"
             "- 如果两张图中的中央车辆车号/车身编号/放大号清晰可见且一致，直接判定为“正常”。\n"
             "- 如果两张图中的中央车辆车号/车身编号/放大号不一致，直接判定为“换挂”。\n"
-            "- 如果一张图可见而另一张图缺失、被遮挡、看不清、无法识别，直接判定为“换挂”。\n"
-            "- 如果出现车牌不一致、车牌被遮挡、车牌缺失、车牌无法识别等导致编号信息无法相互确认的情况，也直接判定为“换挂”。\n\n"
+            "- 如果两张图都拍到了明确尾部，但编号信息被遮挡、缺失或看不清，导致无法仅靠编号信息下结论，不要直接判定为“换挂”，而是进入结构特征比对。\n"
+            "- 如果其实连有效尾部区域都没有拍全，则不要进入这一优先级，必须回到最高优先级并输出“无法判断”。\n\n"
             "第二优先级：只有在以上编号信息无法确认且不能直接下结论时，再比较车辆结构特征。\n"
             "重点关注以下稳定结构特征：\n"
             "- 尾部门开合方式\n"
@@ -43,12 +47,12 @@ class TailVehicleCheck:
             "注意事项：\n"
             "1. 必须只看中央车辆，不能拿边缘车辆或背景目标做判断。\n"
             "2. 颜色深浅、白天黑夜、雨雪雾、阴影、反光、模糊、视角轻微变化，不能单独作为正常或换挂依据。\n"
-            "3. 货物多少、货物形状、货物颜色、遮挡物，不作为正常依据；如果它导致一张图可见编号而另一张图编号无法确认，仍按“换挂”处理。\n"
-            "4. 不要输出模糊结论，不要输出第三种标签。\n\n"
+            "3. 货物多少、货物形状、货物颜色、遮挡物，不作为正常依据；如果它导致尾部有效信息不足，应输出“无法判断”，而不是直接判定“换挂”。\n"
+            "4. 允许输出第三种标签“无法判断”，仅在尾部视角有效信息不足、无法形成可靠尾部比对时使用。\n\n"
             "请按以下 JSON 格式输出，且只能输出一个 JSON 对象，不要输出额外解释：\n"
             "{\n"
-            '  "label": "正常或换挂",\n'
-            '  "reason": "一句到两句中文说明，先说明是否比对到了车号/车身编号/放大号；如果没有，再说明依据了哪些尾部结构特征",\n'
+            '  "label": "正常/换挂/无法判断",\n'
+            '  "reason": "一句到两句中文说明；如果为无法判断，必须明确写出尾部视角信息不足，需要回退主视角裁切车尾图",\n'
             '  "plate_or_number_consistency": "一致/不一致/无法确认",\n'
             '  "structure_consistency": "一致/不一致/未检验"\n'
             "}\n"
@@ -79,6 +83,8 @@ class TailVehicleCheck:
             return "正常"
         if text in {"换挂", "change_trailer", "different", "异常", "不一致"}:
             return "换挂"
+        if text in {"无法判断", "无法判定", "undetermined", "unknown", "insufficient", "insufficient_tail_evidence"}:
+            return "无法判断"
 
         raw = str(value or "").strip()
         if raw in self.VALID_LABELS:
@@ -106,6 +112,19 @@ class TailVehicleCheck:
 
     def _fallback_label_from_text(self, text: str) -> str:
         plain = str(text or "")
+        plain_lower = plain.lower()
+        if (
+            "无法判断" in plain
+            or "无法判定" in plain
+            or "证据不足" in plain
+            or "信息不足" in plain
+            or "未拍到尾部" in plain
+            or "需回退主视角" in plain
+            or "回退主视角" in plain
+            or "undetermined" in plain_lower
+            or "insufficient" in plain_lower
+        ):
+            return "无法判断"
         if "换挂" in plain or "change_trailer" in plain.lower():
             return "换挂"
         if "正常" in plain or "normal" in plain.lower():
@@ -166,9 +185,9 @@ class TailVehicleCheck:
             )
 
             if label == "未知":
-                label = "换挂"
+                label = "无法判断"
                 if not reason:
-                    reason = "模型未能稳定输出标准结果，按保守规则判定为换挂。"
+                    reason = "尾部视角信息不足或模型未能稳定输出标准结果，需要回退主视角裁切车尾图继续判断。"
                 if plate_or_number_consistency == "一致":
                     structure_consistency = "未检验"
 

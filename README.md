@@ -1,6 +1,5 @@
 ﻿
-套牌车识别项目版本管理
- # 日志
+
  ## 2025-11-12
 
 - **[新增] 图像裁切预处理类**
@@ -809,3 +808,192 @@
 - **[增强] 前置 OCR 控制台日志**
   - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
   - **变更内容**：新增终端日志，输出 `text1/text2`、`area1/area2`、`score1/score2`、`match`、`similarity`、`reason`，便于现场排查 OCR 预处理结果。
+  
+ ## 2026-05-13
+
+- **[前端调整] 记录详情页隐藏“备注”展示**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
+  - 变更：记录详情弹窗“基本信息”区域不再显示 `备注` 字段，避免无关键值占用页面空间。
+
+- **[前端调整] 记录详情页隐藏“阶段耗时”展示**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
+  - 变更：记录详情弹窗“判定链路”区域不再显示 `stage_ms` 的 JSON 明细，仅保留总耗时、AI 判断耗时、差异分析耗时等汇总信息。
+
+- **[定位] 车头 OCR 不一致且高相似度时的 AI 复核输入**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 结论：车头 OCR 预比对与车头 AI 复核默认都使用主视角整车裁切后再裁出的车头图（`h1/h2`）；若车头部位检测失败，则会回退为整车裁切图。
+
+- **[增强] 车头 AI 复核提示词**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
+  - 变更：补充车头 AI 复核规则，明确要求忽略环境光、反光、阴影、污渍、轻微角度变化等干扰；加强对车头/车门文字区域、引擎盖装饰、品牌标识差异的关注。
+  - 说明：由于原文件中旧版 `_build_head_prompt` 段落存在编码显示问题，本次通过在后文追加同名函数的方式覆盖旧实现；运行时以后定义版本为准。
+
+
+  主流程
+
+读取主视角两张图 img1/img2
+如果有，再读取尾部视角两张图 img3/img4
+主视角做整车裁切
+从整车里裁出：
+head1/head2
+tail1/tail2
+Siamese 计算：
+head_prob
+tail_prob
+第一层分类
+
+如果 head_prob is None 或 tail_prob is None
+返回 abnormal
+
+如果 head_prob < head_threshold
+一阶段结果记为 fake_plate
+
+如果 head_prob >= head_threshold 且 tail_prob <= tail_threshold
+一阶段结果记为 change_trailer
+
+否则
+一阶段结果记为 normal
+
+OCR 预检
+
+先对 head1/head2 做 OCR
+如果 OCR 没拿到有效文本
+继续后续 AI 判断，不直接改结果
+如果 OCR 文本一致
+继续后续 AI 判断，不直接改结果
+如果 OCR 文本不一致：
+如果 head_prob > 0.8
+进入“强制车头 AI 复核”
+否则
+直接返回 fake_plate
+AI 总入口
+
+如果 head_prob < 0.1
+直接返回 fake_plate
+这里会跳过所有 AI
+
+如果不是 OCR 强制复核，并且：
+
+head_prob > head_threshold
+tail_prob > tail_threshold
+直接返回 normal
+否则进入 AI 二次判断
+
+车头 AI
+
+如果满足下面任一条件，车头需要 AI：
+head_prob <= head_threshold
+OCR 不一致且 head_prob > 0.8，触发了强制复核
+车头 AI 输入：
+head1/head2
+车头 AI 输出：
+fake_plate
+normal
+其他无效结果
+如果车头 AI 输出无效
+回退一阶段结果
+车尾 AI
+
+如果 tail_prob > tail_threshold
+车尾不需要 AI
+
+如果 tail_prob <= tail_threshold
+车尾需要 AI
+
+如果提供了 img3/img4
+先准备 3/4 视角尾部裁切图：
+
+tail_view_crop3
+tail_view_crop4
+先跑 3/4 视角尾部 AI
+
+3/4 视角尾部 AI
+
+先检查两张图是否都有足够尾部信息
+如果尾部信息不足
+返回 无法判断
+如果两张图尾部编号明确一致
+返回 正常
+如果两张图尾部编号明确不一致
+返回 换挂
+如果编号无法确认，但尾部结构可比较
+再看结构：
+结构明显不一致 -> 换挂
+结构无明显不一致 -> 正常
+3/4 视角结果分流
+
+如果 3/4 视角 AI 返回 正常
+车尾判正常，结束车尾判断
+
+如果 3/4 视角 AI 返回 换挂
+车尾判换挂，结束车尾判断
+
+如果 3/4 视角 AI 返回 无法判断
+回退到主视角车尾裁切图 AI
+
+主视角车尾 AI 回退
+
+输入：
+tail1/tail2
+AI 输出：
+change_trailer
+normal
+无效
+如果主视角车尾 AI 也无效
+回退一阶段结果
+最终合成
+
+如果 AI 过程中关键结果无效
+最终结果 = 一阶段结果
+
+否则如果车头 verdict = fake_plate
+最终结果 = fake_plate
+
+否则如果车尾 verdict = different
+最终结果 = change_trailer
+
+否则
+最终结果 = normal
+
+你现在可以把它理解成一句最短版
+
+先用 Siamese 做头尾相似度初筛
+车头先做 OCR
+OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
+车尾低相似度时，优先看 3/4 视角尾部 AI
+3/4 视角信息不足，再回退主视角车尾裁切 AI
+最后综合成 normal / fake_plate / change_trailer
+
+## 2026-05-16
+
+- **[前端修复] 预测页差异卡片优先显示最终差异总结**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/static/ui.js`
+  - 变更：预测页右侧差异卡片改为优先读取 `final_diff_summary`，无值时再回退 `diff_desc`。
+  - 效果：避免将 OCR 复核触发说明误当作最终异常结论展示。
+
+- **[前端修复] 记录页主视角尾部 AI 结果展示受真实触发开关控制**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
+  - 变更：记录详情页“主视角尾部AI结果”仅在 `main_tail_ai_used=true` 时显示结果，否则显示 `-`。
+  - 效果：避免未触发主视角尾部 AI 时仍误显示 `change_trailer/normal`。
+
+- **[后端修复] 3/4 视角尾部 AI 不再复用主视角尾部结果字段**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - `tail_second_check_*` 明确仅表示 3/4 视角尾部 AI 优先判定结果；
+    - `ai_tail_*` 明确仅表示主视角车尾裁切图 AI 结果；
+    - 3/4 视角尾部 AI 返回 `正常/换挂` 时，不再写入 `ai_tail_result/ai_tail_reason`。
+  - 效果：彻底拆开两条尾部 AI 链路，避免字段语义污染。
+
+- **[文案调整] 记录详情页 AI 字段名称与理由标题对齐业务口径**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
+  - 变更：
+    - “头部AI结果”改为“头部视角车头AI结果”
+    - “3/4尾部AI结果”改为“尾部视角车尾AI结果”
+    - “主视角尾部AI结果”改为“头部视角AI结果”
+    - 理由区标题同步调整
+  - 说明：仅修改前端展示名称，不改后端变量名与返回字段。
+
+- **[前端优化] 记录详情页头部视角车头/车尾裁切图改为完整显示**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
+  - 变更：仅对 `head1/head2/tail1/tail2` 这 4 张裁切图增加 `contain` 展示样式，其余图片仍保持原有 `cover`。
+  - 效果：头部视角车头图、车尾图在记录详情页中不再被固定比例裁掉，便于人工复核。
