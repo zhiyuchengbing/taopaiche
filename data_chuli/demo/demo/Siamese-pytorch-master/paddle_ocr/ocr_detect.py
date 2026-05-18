@@ -8,6 +8,13 @@ class MaxBoxOCR:
     提取 OCR 中最大检测框对应的文本，并提供容错比对。
     """
 
+    MONITOR_OVERLAY_TEMPLATES = [
+        "车头抓拍",
+        "车型抓拍车头",
+        "车型抓拍",
+        "抓拍车头",
+    ]
+
     def __init__(
         self,
         use_doc_orientation_classify=False,
@@ -26,17 +33,14 @@ class MaxBoxOCR:
             return ""
 
         text = str(text).upper().strip()
-
         text = re.sub(r"[\s\-_./]+", "", text)
         text = re.sub(r"[^A-Z0-9]", "", text)
-
         return text
 
     @staticmethod
     def extract_digits(text):
         if not text:
             return ""
-
         return "".join(ch for ch in str(text) if ch.isdigit())
 
     @staticmethod
@@ -73,6 +77,49 @@ class MaxBoxOCR:
         text = re.sub(r"[^\u4e00-\u9fffA-Z0-9]", "", text.upper())
         return text
 
+    @classmethod
+    def _is_monitor_overlay_text(cls, raw_text):
+        raw = str(raw_text or "").strip()
+        if not raw:
+            return False
+
+        clean = cls.normalize_chinese_text(raw)
+        if not clean:
+            return False
+
+        for template in cls.MONITOR_OVERLAY_TEMPLATES:
+            template_clean = cls.normalize_chinese_text(template)
+            if clean == template_clean:
+                return True
+            # 裁剪后可能只剩角标的一部分，3 个字及以上的半截也过滤
+            if len(clean) >= 3 and (clean in template_clean or template_clean in clean):
+                return True
+
+        has_date_markers = sum(marker in raw for marker in ("月", "日", "星期", ":"))
+        has_many_digits = len(re.findall(r"\d", raw)) >= 4
+        if has_date_markers >= 2 and has_many_digits:
+            return True
+
+        if re.search(r"\d{1,2}:\d{2}(:\d{2})?", raw):
+            return True
+
+        if re.search(r"\d{1,2}月\d{1,2}日", raw):
+            return True
+
+        if "星期" in raw:
+            return True
+
+        return False
+
+    @classmethod
+    def sanitize_ocr_text(cls, text):
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        if cls._is_monitor_overlay_text(raw):
+            return ""
+        return raw
+
     @staticmethod
     def longest_common_contiguous_length(text1, text2):
         if not text1 or not text2:
@@ -101,8 +148,8 @@ class MaxBoxOCR:
         return bool(set(text1) & set(text2))
 
     def compare_texts(self, text1, text2):
-        raw1 = self.extract_text_value(text1)
-        raw2 = self.extract_text_value(text2)
+        raw1 = self.sanitize_ocr_text(self.extract_text_value(text1))
+        raw2 = self.sanitize_ocr_text(self.extract_text_value(text2))
         clean1 = self.normalize_chinese_text(raw1)
         clean2 = self.normalize_chinese_text(raw2)
         longest_common = self.longest_common_contiguous_length(clean1, clean2)
@@ -170,20 +217,17 @@ class MaxBoxOCR:
         result["reason"] = "text_mismatch"
         return result
 
-    def get_max_text(self, img_path, min_score=0.2):
+    def get_max_text(self, img_path, min_score=0.6):
         """
-        获取置信度 >= min_score 的最大检测框文字
+        获取置信度 >= min_score 的最大检测框文字。
         """
-
         result = self.ocr.predict(img_path)
 
         max_area = 0
-
         max_text = ""
         max_score = 0.0
 
         for res in result:
-
             data = res.json["res"]
 
             texts = data["rec_texts"]
@@ -191,9 +235,11 @@ class MaxBoxOCR:
             scores = data["rec_scores"]
 
             for text, points, score in zip(texts, polys, scores):
-
-                # 过滤低置信度
                 if score < min_score:
+                    continue
+
+                text = self.sanitize_ocr_text(text)
+                if not text:
                     continue
 
                 xs = [p[0] for p in points]
@@ -201,7 +247,6 @@ class MaxBoxOCR:
 
                 width = max(xs) - min(xs)
                 height = max(ys) - min(ys)
-
                 area = width * height
 
                 if area > max_area:
@@ -216,7 +261,6 @@ class MaxBoxOCR:
         }
 
     def compare_images(self, img1_path, img2_path, min_score=0.8):
-
         result = {
             "img1_path": str(img1_path),
             "img2_path": str(img2_path),
@@ -232,7 +276,6 @@ class MaxBoxOCR:
         }
 
         try:
-
             ocr1 = self.get_max_text(img1_path, min_score)
             ocr2 = self.get_max_text(img2_path, min_score)
 
@@ -241,51 +284,29 @@ class MaxBoxOCR:
 
             print("图片1最大框文字:", text1)
             print("图片2最大框文字:", text2)
-
             print("图片1置信度:", ocr1["score"])
             print("图片2置信度:", ocr2["score"])
 
             compare_result = self.compare_texts(text1, text2)
 
             result.update(compare_result)
-
             result["ocr1"] = ocr1
             result["ocr2"] = ocr2
-
             result["error"] = None
-
             return result
-
         except Exception as e:
-
             result["error"] = str(e)
             result["reason"] = "ocr_exception"
             result["match"] = None
-
             return result
 
 
 if __name__ == "__main__":
-
     img1 = r"D:\project\data_chuli\demo\demo\Siamese-pytorch-master\exports\export_20260512_174610\fake_plate\20260512_174532_1e80450e_fake_plate\head1.jpg"
-
     img2 = r"D:\project\data_chuli\demo\demo\Siamese-pytorch-master\exports\export_20260512_174610\fake_plate\20260512_174532_1e80450e_fake_plate\head2.jpg"
 
     ocr_model = MaxBoxOCR()
 
-    # # 双图比对
-    # result = ocr_model.compare_images(
-    #     img1,
-    #     img2,
-    #     min_score=0.8
-    # )
-
-    # print("比对结果:")
-    # print(result)
-
-    # print("\n" + "=" * 50 + "\n")
-
-    # 单图 OCR
     single_result = ocr_model.get_max_text(
         img2,
         min_score=0.4
