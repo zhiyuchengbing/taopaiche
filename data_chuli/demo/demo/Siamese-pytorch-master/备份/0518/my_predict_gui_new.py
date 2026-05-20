@@ -2192,7 +2192,9 @@ def _populate_ai_trace_texts(result: Dict[str, Any], head_prob: Optional[float])
         text1 = str(result.get("ocr_text1") or "").strip() or "-"
         text2 = str(result.get("ocr_text2") or "").strip() or "-"
 
-        if (
+        if head_prob is not None and head_prob < _DIRECT_FAKE_PLATE_HEAD_THRESHOLD:
+            final_diff_summary = "套牌：车头相似度过低，直接判定为套牌"
+        elif (
             (not head_ai_used)
             and head_prob is not None
             and head_prob <= _HEAD_THRESHOLD
@@ -2633,7 +2635,6 @@ def _classify_with_ai_second_judge(
         cropped_pils: Optional[Dict[str, Image.Image]] = None,
         tail_original_paths: Optional[Tuple[str, str]] = None,
         force_head_ai_recheck: bool = False,
-        ocr_match: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     两层鉴别分类：
@@ -2697,16 +2698,21 @@ def _classify_with_ai_second_judge(
     stage1_case_type = _classify_case(head_prob, tail_prob)
     result["stage1_case_type"] = stage1_case_type
 
-    if (
-        (not force_head_ai_recheck)
-        and head_prob > head_direct_normal_th
-        and tail_prob > tail_direct_normal_th
-        and ocr_match is not False
-    ):
+    if head_prob < _DIRECT_FAKE_PLATE_HEAD_THRESHOLD:
+        result["case_type"] = "fake_plate"
+        result["diff_desc"] = "车头相似度过低，直接判定为套牌"
+        result["diff_analyzed_part"] = "head"
+        print(
+            f"[predict] head similarity {head_prob:.4f} is below direct fake-plate "
+            f"threshold {_DIRECT_FAKE_PLATE_HEAD_THRESHOLD}, skipping all AI analysis"
+        )
+        return _populate_ai_trace_texts(result, head_prob)
+
+    if (not force_head_ai_recheck) and head_prob > head_direct_normal_th and tail_prob > tail_direct_normal_th:
         result["case_type"] = "normal"
         return _populate_ai_trace_texts(result, head_prob)
 
-    head_need_ai = force_head_ai_recheck or (head_prob <= head_direct_normal_th) or (ocr_match is False)
+    head_need_ai = force_head_ai_recheck or (head_prob <= head_direct_normal_th)
     tail_need_ai = tail_prob <= tail_direct_normal_th
 
     if head_need_ai:
@@ -2738,14 +2744,7 @@ def _classify_with_ai_second_judge(
                 print(
                     f"[predict] head similarity {head_prob:.4f} requires head AI recheck"
                 )
-                low_similarity_fallback_label = (
-                    "fake_plate" if head_prob is not None and head_prob <= head_direct_normal_th else "normal"
-                )
-                ai_head_payload = _AI_CHECKER.check_head_with_reason(
-                    h1_path,
-                    h2_path,
-                    low_similarity_fallback_label=low_similarity_fallback_label
-                )
+                ai_head_payload = _AI_CHECKER.check_head_with_reason(h1_path, h2_path)
                 ai_head = str(ai_head_payload.get("label") or "")
                 ai_head_reason = str(ai_head_payload.get("reason") or "").strip()
                 if ai_head in ("fake_plate", "normal"):
@@ -2753,9 +2752,9 @@ def _classify_with_ai_second_judge(
                     result["ai_head_reason"] = ai_head_reason or None
                     head_verdict = ai_head
                 elif ai_head == "unknown":
-                    if head_prob is not None and head_prob <= head_direct_normal_th:
+                    if head_prob is not None and head_prob < head_direct_normal_th:
                         head_verdict = "fake_plate"
-                        fallback_reason = "输入图片质量太差，AI无法判断，车头相似度低于或等于阈值，判断为套牌"
+                        fallback_reason = "输入图片质量太差，AI无法判断，车头相似度低于阈值，判断为套牌"
                     else:
                         head_verdict = "normal"
                         fallback_reason = "输入图片质量太差，AI无法判断，车头相似度大于阈值，判断为正常"
@@ -2934,23 +2933,37 @@ def _classify_with_head_ocr_precheck(
     ocr_result = _run_head_ocr_precheck(cropped_pils)
     result.update(ocr_result)
 
+    if ocr_result.get("ocr_match") is False:
+        text1 = ocr_result.get("ocr_text1") or ""
+        text2 = ocr_result.get("ocr_text2") or ""
+        if head_prob is not None and head_prob > _HEAD_OCR_AI_RECHECK_THRESHOLD:
+            downstream = _classify_with_ai_second_judge(
+                head_prob,
+                tail_prob,
+                cropped_pils,
+                tail_original_paths=tail_original_paths,
+                force_head_ai_recheck=True,
+            )
+            downstream.update(ocr_result)
+            downstream["diff_desc"] = (
+                f"车头OCR不一致，但车头相似度 {head_prob:.4f} 高于 {_HEAD_OCR_AI_RECHECK_THRESHOLD:.2f}，"
+                f"已触发车头AI复核: '{text1}' vs '{text2}'"
+            )
+            downstream["diff_analyzed_part"] = "head"
+            return _populate_ai_trace_texts(downstream, head_prob)
+
+        result["case_type"] = "fake_plate"
+        result["diff_desc"] = f"车头OCR不一致，判定为套牌: '{text1}' vs '{text2}'"
+        result["diff_analyzed_part"] = "head"
+        return _populate_ai_trace_texts(result, head_prob)
+
     downstream = _classify_with_ai_second_judge(
         head_prob,
         tail_prob,
         cropped_pils,
         tail_original_paths=tail_original_paths,
-        force_head_ai_recheck=bool(ocr_result.get("ocr_match") is False and head_prob is not None and head_prob > _HEAD_THRESHOLD),
-        ocr_match=ocr_result.get("ocr_match"),
     )
     downstream.update(ocr_result)
-    if ocr_result.get("ocr_match") is False:
-        text1 = ocr_result.get("ocr_text1") or ""
-        text2 = ocr_result.get("ocr_text2") or ""
-        if downstream.get("head_ai_used") and not downstream.get("diff_desc"):
-            downstream["diff_desc"] = (
-                f"车头OCR不一致，已触发车头AI复核: '{text1}' vs '{text2}'"
-            )
-            downstream["diff_analyzed_part"] = "head"
     return _populate_ai_trace_texts(downstream, head_prob)
 
 

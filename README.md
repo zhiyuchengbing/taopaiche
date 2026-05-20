@@ -1043,3 +1043,44 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
     - 明确编号不可靠时优先转结构比对，结构也不可靠时再回退主视角车尾 AI；
     - 明确积灰、泥污、锈蚀、掉漆、补漆会改变尾门和保险杠表观颜色，`红/灰/深/浅` 不能单独作为换挂依据。
   - 效果：降低尾部视角中因小车牌误读、颜色表观变化导致的换挂误判。
+
+## 2026-05-20
+
+- **[后端调整] 车头 AI 触发链路改为“先看相似度，再用 OCR 兜底触发”**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - 保留车头 OCR 预检，但不再因为 `ocr_match=false` 直接终判套牌；
+    - 车头 AI 触发条件统一改为：`head_prob <= head_threshold`，或 `head_prob > head_threshold` 且车头 OCR 不一致；
+    - 只有 `head_prob > head_threshold` 且 OCR 一致时，车头才不进入 AI。
+  - 效果：减少“OCR 一次误识别直接套牌”的硬拦截，让车头 AI 真正承担复核职责。
+
+- **[后端调整] 移除“车头相似度低于 0.1 直接套牌并跳过所有 AI”短路链路**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - 删除 `head_prob < DIRECT_FAKE_PLATE_HEAD_THRESHOLD` 时直接返回 `fake_plate` 的逻辑；
+    - 同步移除最终差异摘要里“车头相似度过低，直接判定为套牌”的旧文案分支。
+  - 效果：避免极低相似度样本被过早终判，减少这条短路链路带来的误检。
+
+- **[提示词优化] 车头视角 AI 收紧导流罩/遮阳板文字的有效证据条件**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
+  - 变更：明确导流罩、引擎盖顶部遮阳板、车头文字区域、喷涂标识区域，只有在两张图该区域都清晰可见，且未被强反光、过曝、发白、眩光、污渍或阴影遮盖时，才可依据文字内容差异判定 `fake_plate`。
+  - 效果：降低“白字一边清晰、一边被反光洗掉”这类样本被误判套牌的概率。
+
+- **[提示词优化] 车头视角 AI 明确套牌依据只能从车体本身寻找**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
+  - 变更：
+    - 明确过磅自助机、建筑物、背景牌子、地磅设备、路面设施等非车辆对象，不能拿来与另一张图中的车头做结构差异比较；
+    - 将“其中一张图没有清晰车头主体，或主要拍到非车辆对象”统一归入“输入图片质量太差”的情况。
+  - 效果：避免模型拿场景设备去和车头做 `fake_plate` 比较，减少明显脏样本的误判。
+
+- **[提示词与回退口径对齐] 车头 AI 仅输出 `fake_plate/normal`，图片质量太差时按相似度阈值给出解释性结论**
+  - 文件：
+    - `data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
+    - `data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - 车头 AI 提示词不再要求输出 `unknown`；
+    - 当输入图片质量太差、长时间无法稳定判断或无法形成可靠车头结论时，统一使用解释性兜底文案：
+      - `输入图片质量太差，AI无法判断，车头相似度低于或等于阈值，判断为套牌`
+      - `输入图片质量太差，AI无法判断，车头相似度大于阈值，判断为正常`
+    - 最后一行仍只输出 `fake_plate` 或 `normal`。
+  - 效果：统一车头 AI 无法稳定判别时的业务口径，避免提示词里暴露“给定兜底结论”这类内部措辞。
