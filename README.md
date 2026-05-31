@@ -1,126 +1,4 @@
-﻿
-
- ## 2025-11-12
-
-- **[新增] 图像裁切预处理类**
-  - 文件：`data_chuli/cropper.py`
-  - 内容：新增 `VehicleCropper`，使用 YOLOv8 检测车辆并裁切最大目标，可选对车牌做黑色打码（HyperLPR3）。输入输出均为内存中的 `PIL.Image`。
-
-- **[集成] GUI 预测前调用裁切**
-  - 文件：`Siamese-pytorch-master/my_predict_gui.py`
-  - 变更：导入并初始化 `VehicleCropper`，在 `predict_similarity` 中对两张图片先 `process_pil` 后再送入 Siamese 比对。
-
-- **[修复] 概率格式化报错**
-  - 文件：`Siamese-pytorch-master/my_predict_gui.py`
-  - 变更：将 `detect_image` 的返回 `Tensor` 转为 `float` 再比较/格式化，避免 “unsupported format string passed to Tensor.__format__”。
-
-- **[版本控制] 放开日志文件追踪**
-  - 文件：`.gitignore`
-  - 变更：新增 `!开发日志.md`，允许将开发日志提交到 Git。
-
-## 2025-11-13
-
-- **[新增] 批量套牌检测脚本**
-  - 文件：`Siamese-pytorch-master/detect_clone_plates.py`
-  - 功能：按车牌分组、仅向过去寻找“最近一趟”有图记录进行相似度比对；当前行无图=不可判定；仅使用 `过皮部位1图片URL`；默认阈值 `0.3`；输出 `clone_check_report.csv`。
-  - 复用：`siamese.Siamese` 与 `data_chuli.cropper.VehicleCropper` 的预处理/推理流程。
-
-- **[新增] 可视化批处理 GUI**
-  - 文件：`Siamese-pytorch-master/clone_checker_gui.py`
-  - 功能：选择 CSV、一键运行、展示当前/参考图片信息、相似度与判定结果；支持阈值调整；结果保存路径提示。
-  - 复用：与命令行一致的模型与裁剪流程。
-
-- **[修复] 导入路径**
-  - 文件：`Siamese-pytorch-master/clone_checker_gui.py`
-  - 变更：修正为从同目录导入 `detect_from_csv`，避免包路径错误。
-
-- **[新增] 数据统计小工具**
-  - 文件：`data_chuli/data_tongji.py`
-  - 功能：按 `车号` 统计出现次数，输出 `plate_counts.csv` 与 `duplicate_rows.csv`，用于快速查看重复车牌与明细。
-
- 
- ## 2026-01-05
- 
- ### 阈值调整（疑似套牌）
- - **变更内容**：将“疑似套牌”头部相似度阈值默认值调整为 `0.8`。
- - **判定规则**：`head_prob < 0.8` 判定为疑似套牌（等于 `0.8` 不判定为低）。
- - **同步范围**：主批量检测逻辑 + “本地两图比对”工具页。
- 
- ### 数据库批量检测：从指定日期开始（按 TASK_ID）
- - **入口**：“从数据库批量检测”弹窗新增模式 `从指定日期开始...`。
- - **日期选择**：日历选择起始日期（包含当天）。
- - **过滤规则**：按 `TASK_ID` 前 6 位 `yyMMdd` 解析日期，过滤 `TASK_YYMMDD >= 起始日期yyMMdd`。
- - **清理策略**：自动删除 `D:\output` 下起始日期之前的结果文件夹（按文件夹名中的 `TASK_ID` 前缀判断）。
- - **结果更新**：覆盖写入默认 CSV（无疑似结果时也覆盖为空表头，避免旧结果残留）。
- - **状态更新**：`last_task_id` 使用本次参与检测数据的最大 `TASK_ID` 更新。
-
- ## 2026-01-15
-
- - **[新增] Flask 后端推理服务（两图比对：车头/车尾）**
-   - 文件：`Siamese-pytorch-master/my_predict_gui_new1.py`
-   - 接口：`GET /health`、`POST /predict`
-   - 输出：`head_prob` / `tail_prob` 与 `case_type`
-
- - **[新增] 图片路径校验与安全控制**
-   - 规则：必须绝对路径、必须存在且是图片扩展名（`.jpg/.jpeg/.png/.bmp/.webp`）
-   - 白名单：支持 `ALLOWED_BASE_DIRS` 限制可访问目录
-
- - **[新增] 本地缺失文件的远程拉取（可关闭）**
-   - 组件：`data_tran.image_resolver.ImagePathResolver`
-   - 开关：`REMOTE_FETCH_ENABLED`（关闭后本地不存在直接报错）
-
- - **[新增] 车头/车尾部位裁切**
-   - 方式：YOLO 检测车头/车尾框并裁切最高置信度目标（`cls_id=0` 车头、`cls_id=1` 车尾）
-   - 模型：`HEADTAIL_MODEL_PATH`
-
- - **[增强] 并发保护**
-   - 初始化：`_INIT_LOCK`
-   - 推理：`_INFER_LOCK`
-
- - **[新增] Web 前端页面（远端浏览器访问）**
-   - 页面：`GET /ui`
-   - 前端文件：`Siamese-pytorch-master/templates/ui.html`、`Siamese-pytorch-master/static/ui.css`、`Siamese-pytorch-master/static/ui.js`
-   - 功能：支持“路径/链接预测”和“本地上传预测”，并提供结果下载（JSON/CSV）按钮
-
- - **[新增] 本地上传预测接口（适配远端电脑图片在本机）**
-   - 接口：`POST /predict_upload`（`multipart/form-data`）
-   - 字段：`file1`、`file2`
-
- - **[增强] /predict 支持 http(s) 图片链接**
-   - 说明：当 `path1/path2` 为 `http(s)://...` 时，服务端先拉取到本地再推理
-
- - **[新增] 预览推理接口（返回 6 张裁切图）**
-   - 接口：`POST /predict_preview`、`POST /predict_upload_preview`
-   - 返回：在原有 `head_prob/tail_prob/case_type` 基础上增加 `previews`（6 张图的 base64 dataURL）
-
- - **[增强] /ui 页面简洁改版 + 使用教程**
-   - 标题：`过磅车辆智能识别系统 v4.2`
-   - 风格：白底简洁
-   - 功能：新增“使用教程”弹窗，结果区支持 6 图可视化与概率进度条
-
- ## 2026-01-22
-
- - **[修复] Ultralytics 数据集切分输出结构**
-   - 文件：`truck_detect/split_train_val.py`
-   - 变更：输出目录固定为 `images/train|val` + `labels/train|val`（YOLO txt）；不再导出/复制 XML 到 split 数据集。
-
- - **[更新] 检测权重默认切换为训练得到的 best.pt**
-   - 文件：`truck_detect/truck_detect.py`、`truck_detect/export_labelimg_xml.py`
-   - 变更：默认模型路径改为自训 `best.pt`，并保留找不到时回退到旧 `yolo26m.pt`。
-
- - **[修复] 自训模型类别过滤导致“检测不到框”**
-   - 文件：`truck_detect/truck_detect.py`、`truck_detect/export_labelimg_xml.py`
-   - 变更：不再硬编码 COCO 类别；根据 `model.names` 自动推断类别（自训仅 0 类时可正常出框）。
-
- - **[更新] 后端车辆裁切改用自训车辆检测权重（仅 0 类）**
-   - 文件：`data_chuli/cropper.py`
-   - 变更：默认车辆检测权重切换为自训 `best.pt`；类别默认 `[0]`；裁切策略改为“取最靠近中心的检测框”。
-
- - **[新增] 车辆先裁切再车牌打码（可视化测试脚本）**
-   - 文件：`data_chuli/plate_mask_yolo.py`
-   - 功能：先用车辆检测框裁切车辆，再用车牌模型检测框打码（黑块/模糊）；封装 `PlateMasker` 类，运行脚本只需改 `DEMO_IMAGE_PATH` 即可弹窗可视化；可视化自动缩放适配屏幕。
-
- # 后端服务（Flask）
+﻿ # 后端服务（Flask）
 
  ## 服务入口
 
@@ -772,63 +650,6 @@
   - `ai_diff_ms`
 现有判别逻辑是：系统先用前两张主图做车辆裁切、车头车尾部位裁切，并计算 head_prob 和 tail_prob；如果车头和车尾相似度都高于阈值，就直接判定为 normal，否则进入原有 AI 二次判断，其中车头分支用于判断是否 fake_plate，车尾分支用于判断是否 change_trailer。如果本次是四地址模式，并且原方案最终先判成了 change_trailer，系统才会再使用后两张尾部原图做一次尾部确认：优先比对中央车辆的车号、车身编号、放大号，无法确认时再比对尾门、栏杆、尾灯、车厢结构等特征；如果二次确认仍判换挂，则最终结果保持 change_trailer，如果二次确认判为正常，则最终改判为 normal。
 
-## 2026-05-11
-
-- **[调整] 车头 OCR 预处理链路重构为“先提字、后比对”**
-  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
-  - **变更内容**：
-    - 前置 OCR 仅针对 1/2 视角车辆检测后的车头裁切图 `h1/h2` 执行；
-    - 主流程分别调用两次 `MaxBoxOCR.get_max_text()` 提取两张车头图的最大有效文字；
-    - 再调用 `compare_texts()` 比较两边 OCR 文本，不再直接用整段结构体字符串做匹配。
-
-- **[新增] 车头 OCR 置信度与面积双门槛**
-  - **变更文件**：
-    - `data_chuli/demo/demo/Siamese-pytorch-master/paddle_ocr/ocr_detect.py`
-    - `data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
-  - **变更内容**：
-    - `get_max_text()` 默认只保留 `score >= 0.6` 的 OCR 候选；
-    - 在候选中选取面积最大的文字；
-    - 主流程新增 `HEAD_OCR_MIN_AREA`，默认值 `20000`；
-    - 仅当 `area > 20000` 时才认为该 OCR 结果有效，否则按“无有效文字”处理。
-
-- **[调整] 车头 OCR 文本比对规则改为字符命中策略**
-  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/paddle_ocr/ocr_detect.py`
-  - **变更内容**：
-    - 长文本要求存在“连续两个字符一致”才允许放行；
-    - 当短文本长度不超过 2 个字符时，只要存在 1 个字符一致即可放行；
-    - 若两边文本完全一致、标准化后一致、易混字符归一后相同，或数字部分一致，也允许放行；
-    - 否则判定为 OCR 不一致。
-
-- **[调整] 空 OCR 结果不再直接拦截为套牌**
-  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
-  - **变更内容**：
-    - 若两张车头裁切图都未识别到有效文字，则前置 OCR 不直接判 `fake_plate`；
-    - 这类样本按 “OCR 无法提供有效结论” 处理，继续进入后续判别流程。
-
-- **[增强] 前置 OCR 控制台日志**
-  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
-  - **变更内容**：新增终端日志，输出 `text1/text2`、`area1/area2`、`score1/score2`、`match`、`similarity`、`reason`，便于现场排查 OCR 预处理结果。
-  
- ## 2026-05-13
-
-- **[前端调整] 记录详情页隐藏“备注”展示**
-  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
-  - 变更：记录详情弹窗“基本信息”区域不再显示 `备注` 字段，避免无关键值占用页面空间。
-
-- **[前端调整] 记录详情页隐藏“阶段耗时”展示**
-  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
-  - 变更：记录详情弹窗“判定链路”区域不再显示 `stage_ms` 的 JSON 明细，仅保留总耗时、AI 判断耗时、差异分析耗时等汇总信息。
-
-- **[定位] 车头 OCR 不一致且高相似度时的 AI 复核输入**
-  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
-  - 结论：车头 OCR 预比对与车头 AI 复核默认都使用主视角整车裁切后再裁出的车头图（`h1/h2`）；若车头部位检测失败，则会回退为整车裁切图。
-
-- **[增强] 车头 AI 复核提示词**
-  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
-  - 变更：补充车头 AI 复核规则，明确要求忽略环境光、反光、阴影、污渍、轻微角度变化等干扰；加强对车头/车门文字区域、引擎盖装饰、品牌标识差异的关注。
-  - 说明：由于原文件中旧版 `_build_head_prompt` 段落存在编码显示问题，本次通过在后文追加同名函数的方式覆盖旧实现；运行时以后定义版本为准。
-
-
   主流程
 
 读取主视角两张图 img1/img2
@@ -963,6 +784,185 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
 车尾低相似度时，优先看 3/4 视角尾部 AI
 3/4 视角信息不足，再回退主视角车尾裁切 AI
 最后综合成 normal / fake_plate / change_trailer
+
+# 修改记录
+
+## 2025-11-12
+
+- **[新增] 图像裁切预处理类**
+  - 文件：`data_chuli/cropper.py`
+  - 内容：新增 `VehicleCropper`，使用 YOLOv8 检测车辆并裁切最大目标，可选对车牌做黑色打码（HyperLPR3）。输入输出均为内存中的 `PIL.Image`。
+
+- **[集成] GUI 预测前调用裁切**
+  - 文件：`Siamese-pytorch-master/my_predict_gui.py`
+  - 变更：导入并初始化 `VehicleCropper`，在 `predict_similarity` 中对两张图片先 `process_pil` 后再送入 Siamese 比对。
+
+- **[修复] 概率格式化报错**
+  - 文件：`Siamese-pytorch-master/my_predict_gui.py`
+  - 变更：将 `detect_image` 的返回 `Tensor` 转为 `float` 再比较/格式化，避免 “unsupported format string passed to Tensor.__format__”。
+
+- **[版本控制] 放开日志文件追踪**
+  - 文件：`.gitignore`
+  - 变更：新增 `!开发日志.md`，允许将开发日志提交到 Git。
+
+## 2025-11-13
+
+- **[新增] 批量套牌检测脚本**
+  - 文件：`Siamese-pytorch-master/detect_clone_plates.py`
+  - 功能：按车牌分组、仅向过去寻找“最近一趟”有图记录进行相似度比对；当前行无图=不可判定；仅使用 `过皮部位1图片URL`；默认阈值 `0.3`；输出 `clone_check_report.csv`。
+  - 复用：`siamese.Siamese` 与 `data_chuli.cropper.VehicleCropper` 的预处理/推理流程。
+
+- **[新增] 可视化批处理 GUI**
+  - 文件：`Siamese-pytorch-master/clone_checker_gui.py`
+  - 功能：选择 CSV、一键运行、展示当前/参考图片信息、相似度与判定结果；支持阈值调整；结果保存路径提示。
+  - 复用：与命令行一致的模型与裁剪流程。
+
+- **[修复] 导入路径**
+  - 文件：`Siamese-pytorch-master/clone_checker_gui.py`
+  - 变更：修正为从同目录导入 `detect_from_csv`，避免包路径错误。
+
+- **[新增] 数据统计小工具**
+  - 文件：`data_chuli/data_tongji.py`
+  - 功能：按 `车号` 统计出现次数，输出 `plate_counts.csv` 与 `duplicate_rows.csv`，用于快速查看重复车牌与明细。
+
+ 
+ ## 2026-01-05
+ 
+ ### 阈值调整（疑似套牌）
+ - **变更内容**：将“疑似套牌”头部相似度阈值默认值调整为 `0.8`。
+ - **判定规则**：`head_prob < 0.8` 判定为疑似套牌（等于 `0.8` 不判定为低）。
+ - **同步范围**：主批量检测逻辑 + “本地两图比对”工具页。
+ 
+ ### 数据库批量检测：从指定日期开始（按 TASK_ID）
+ - **入口**：“从数据库批量检测”弹窗新增模式 `从指定日期开始...`。
+ - **日期选择**：日历选择起始日期（包含当天）。
+ - **过滤规则**：按 `TASK_ID` 前 6 位 `yyMMdd` 解析日期，过滤 `TASK_YYMMDD >= 起始日期yyMMdd`。
+ - **清理策略**：自动删除 `D:\output` 下起始日期之前的结果文件夹（按文件夹名中的 `TASK_ID` 前缀判断）。
+ - **结果更新**：覆盖写入默认 CSV（无疑似结果时也覆盖为空表头，避免旧结果残留）。
+ - **状态更新**：`last_task_id` 使用本次参与检测数据的最大 `TASK_ID` 更新。
+
+ ## 2026-01-15
+
+ - **[新增] Flask 后端推理服务（两图比对：车头/车尾）**
+   - 文件：`Siamese-pytorch-master/my_predict_gui_new1.py`
+   - 接口：`GET /health`、`POST /predict`
+   - 输出：`head_prob` / `tail_prob` 与 `case_type`
+
+ - **[新增] 图片路径校验与安全控制**
+   - 规则：必须绝对路径、必须存在且是图片扩展名（`.jpg/.jpeg/.png/.bmp/.webp`）
+   - 白名单：支持 `ALLOWED_BASE_DIRS` 限制可访问目录
+
+ - **[新增] 本地缺失文件的远程拉取（可关闭）**
+   - 组件：`data_tran.image_resolver.ImagePathResolver`
+   - 开关：`REMOTE_FETCH_ENABLED`（关闭后本地不存在直接报错）
+
+ - **[新增] 车头/车尾部位裁切**
+   - 方式：YOLO 检测车头/车尾框并裁切最高置信度目标（`cls_id=0` 车头、`cls_id=1` 车尾）
+   - 模型：`HEADTAIL_MODEL_PATH`
+
+ - **[增强] 并发保护**
+   - 初始化：`_INIT_LOCK`
+   - 推理：`_INFER_LOCK`
+
+ - **[新增] Web 前端页面（远端浏览器访问）**
+   - 页面：`GET /ui`
+   - 前端文件：`Siamese-pytorch-master/templates/ui.html`、`Siamese-pytorch-master/static/ui.css`、`Siamese-pytorch-master/static/ui.js`
+   - 功能：支持“路径/链接预测”和“本地上传预测”，并提供结果下载（JSON/CSV）按钮
+
+ - **[新增] 本地上传预测接口（适配远端电脑图片在本机）**
+   - 接口：`POST /predict_upload`（`multipart/form-data`）
+   - 字段：`file1`、`file2`
+
+ - **[增强] /predict 支持 http(s) 图片链接**
+   - 说明：当 `path1/path2` 为 `http(s)://...` 时，服务端先拉取到本地再推理
+
+ - **[新增] 预览推理接口（返回 6 张裁切图）**
+   - 接口：`POST /predict_preview`、`POST /predict_upload_preview`
+   - 返回：在原有 `head_prob/tail_prob/case_type` 基础上增加 `previews`（6 张图的 base64 dataURL）
+
+ - **[增强] /ui 页面简洁改版 + 使用教程**
+   - 标题：`过磅车辆智能识别系统 v4.2`
+   - 风格：白底简洁
+   - 功能：新增“使用教程”弹窗，结果区支持 6 图可视化与概率进度条
+
+ ## 2026-01-22
+
+ - **[修复] Ultralytics 数据集切分输出结构**
+   - 文件：`truck_detect/split_train_val.py`
+   - 变更：输出目录固定为 `images/train|val` + `labels/train|val`（YOLO txt）；不再导出/复制 XML 到 split 数据集。
+
+ - **[更新] 检测权重默认切换为训练得到的 best.pt**
+   - 文件：`truck_detect/truck_detect.py`、`truck_detect/export_labelimg_xml.py`
+   - 变更：默认模型路径改为自训 `best.pt`，并保留找不到时回退到旧 `yolo26m.pt`。
+
+ - **[修复] 自训模型类别过滤导致“检测不到框”**
+   - 文件：`truck_detect/truck_detect.py`、`truck_detect/export_labelimg_xml.py`
+   - 变更：不再硬编码 COCO 类别；根据 `model.names` 自动推断类别（自训仅 0 类时可正常出框）。
+
+ - **[更新] 后端车辆裁切改用自训车辆检测权重（仅 0 类）**
+   - 文件：`data_chuli/cropper.py`
+   - 变更：默认车辆检测权重切换为自训 `best.pt`；类别默认 `[0]`；裁切策略改为“取最靠近中心的检测框”。
+
+ - **[新增] 车辆先裁切再车牌打码（可视化测试脚本）**
+   - 文件：`data_chuli/plate_mask_yolo.py`
+   - 功能：先用车辆检测框裁切车辆，再用车牌模型检测框打码（黑块/模糊）；封装 `PlateMasker` 类，运行脚本只需改 `DEMO_IMAGE_PATH` 即可弹窗可视化；可视化自动缩放适配屏幕。
+
+
+## 2026-05-11
+
+- **[调整] 车头 OCR 预处理链路重构为“先提字、后比对”**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：
+    - 前置 OCR 仅针对 1/2 视角车辆检测后的车头裁切图 `h1/h2` 执行；
+    - 主流程分别调用两次 `MaxBoxOCR.get_max_text()` 提取两张车头图的最大有效文字；
+    - 再调用 `compare_texts()` 比较两边 OCR 文本，不再直接用整段结构体字符串做匹配。
+
+- **[新增] 车头 OCR 置信度与面积双门槛**
+  - **变更文件**：
+    - `data_chuli/demo/demo/Siamese-pytorch-master/paddle_ocr/ocr_detect.py`
+    - `data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：
+    - `get_max_text()` 默认只保留 `score >= 0.6` 的 OCR 候选；
+    - 在候选中选取面积最大的文字；
+    - 主流程新增 `HEAD_OCR_MIN_AREA`，默认值 `20000`；
+    - 仅当 `area > 20000` 时才认为该 OCR 结果有效，否则按“无有效文字”处理。
+
+- **[调整] 车头 OCR 文本比对规则改为字符命中策略**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/paddle_ocr/ocr_detect.py`
+  - **变更内容**：
+    - 长文本要求存在“连续两个字符一致”才允许放行；
+    - 当短文本长度不超过 2 个字符时，只要存在 1 个字符一致即可放行；
+    - 若两边文本完全一致、标准化后一致、易混字符归一后相同，或数字部分一致，也允许放行；
+    - 否则判定为 OCR 不一致。
+
+- **[调整] 空 OCR 结果不再直接拦截为套牌**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：
+    - 若两张车头裁切图都未识别到有效文字，则前置 OCR 不直接判 `fake_plate`；
+    - 这类样本按 “OCR 无法提供有效结论” 处理，继续进入后续判别流程。
+
+- **[增强] 前置 OCR 控制台日志**
+  - **变更文件**：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - **变更内容**：新增终端日志，输出 `text1/text2`、`area1/area2`、`score1/score2`、`match`、`similarity`、`reason`，便于现场排查 OCR 预处理结果。
+  
+ ## 2026-05-13
+
+- **[前端调整] 记录详情页隐藏“备注”展示**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
+  - 变更：记录详情弹窗“基本信息”区域不再显示 `备注` 字段，避免无关键值占用页面空间。
+
+- **[前端调整] 记录详情页隐藏“阶段耗时”展示**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/templates/records.html`
+  - 变更：记录详情弹窗“判定链路”区域不再显示 `stage_ms` 的 JSON 明细，仅保留总耗时、AI 判断耗时、差异分析耗时等汇总信息。
+
+- **[定位] 车头 OCR 不一致且高相似度时的 AI 复核输入**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 结论：车头 OCR 预比对与车头 AI 复核默认都使用主视角整车裁切后再裁出的车头图（`h1/h2`）；若车头部位检测失败，则会回退为整车裁切图。
+
+- **[增强] 车头 AI 复核提示词**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
+  - 变更：补充车头 AI 复核规则，明确要求忽略环境光、反光、阴影、污渍、轻微角度变化等干扰；加强对车头/车门文字区域、引擎盖装饰、品牌标识差异的关注。
+  - 说明：由于原文件中旧版 `_build_head_prompt` 段落存在编码显示问题，本次通过在后文追加同名函数的方式覆盖旧实现；运行时以后定义版本为准。
 
 ## 2026-05-16
 
@@ -1102,3 +1102,41 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
   - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/启动程序.bat`
   - 功能：自动激活 test2 环境并启动主程序，无需手动输入命令
   - 使用：双击运行即可
+  
+## 2026-05-29
+
+### 尾部视角（3/4 原图，`predict_ai_shijiao2.py`）
+
+- **[更新] 换挂结构比对：第二优先级 Tier-A/B**
+  - 重写为 5 步：同位分区 → Tier-A（后开口/侧围）→ 颜色交叉校验 → Tier-B → 结论；号牌不可靠时必须先走 Tier-A，禁止空泛“栏板式一致”。
+
+- **[增强] 货物误判防护（2 条超短硬规则）**
+  - 禁止将堆料/篷布轮廓当作尾门或侧围；无固定门板/立柱证据不得判有尾门/侧挡板。
+
+- **[增强] 号牌一致即正常（最高优先级）**
+  - 两侧挂车号牌/尾部放大号清晰且关键位一致 → 直接判「正常」，`structure_consistency` 填「未检验」，不再做结构比对。
+  - 禁止「号牌一致但因篷布遮挡结构」仍输出「无法判断」。
+
+### 主视角/头部视角车尾（tail1/tail2，`predict_ai.py`）
+
+- **[重构] 与尾部视角提示词分离**
+  - `_build_tail_prompt()` 专用于车头方向下的车尾裁切（侧挡板、轴数、挡泥板、侧挂附件等可见项）。
+  - 废弃此前与 `predict_ai_shijiao2` 同构的尾门/Tier-A/尾灯/号牌比对；不写本视角通常不可见的正后方部件。
+
+### 车头二次复核（`predict_ai.py`）
+
+- **[增强] 输出格式与同位自证**
+  - 理由与标签分两段，最后一行仅 `fake_plate` 或 `normal`；禁止 `fake_plate: normal reason:` 混写。
+  - 涉及文字/标识差异时须写「子区域、图1/图2、同部位对齐=是/否」；未对齐则文字差异无效，不得单凭文字判套牌。
+
+### 代码清理（`predict_ai.py`）
+
+- **[移除] 未再使用的接口与 prompt**
+  - 删除 `_build_prompt()`、`check_vehicle()`（整车单轮三分类，主流程已改为分部位 `check_head` / `check_tail`）。
+  - 删除 `_build_diff_analysis_prompt()`、`analyze_differences()`（差异描述改由 `ai_*_reason` 承担，GUI 不再调用）。
+  - 保留 `_build_tail_prompt()`、`check_tail_with_reason()`（主视角车尾回退 AI 仍在用）。
+
+
+
+
+
