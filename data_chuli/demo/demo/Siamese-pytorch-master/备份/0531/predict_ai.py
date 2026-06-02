@@ -10,7 +10,6 @@ class VehicleCheck:
     """
 
     HEAD_VALID_LABELS = ["fake_plate", "normal"]
-    TAIL_VALID_LABELS = ["change_trailer", "normal"]
 
     def __init__(self, model_name="gemma4:latest"):
         self.model_name = model_name
@@ -25,53 +24,68 @@ class VehicleCheck:
         )
         return (
             "你现在只比较两张车头裁切图，只判断：fake_plate 或 normal。\n\n"
-            "一票否决（最高优先级，违反任一条则不得仅凭文字判 fake_plate）：\n"
-            "V1. 一侧有字、一侧无字，或一侧发白/字符看不清 → 不得单独判套牌；须先判断是否为过曝、反光、阴影、背光或时段光照所致。\n"
-            "V2. 任一侧导流罩、引擎盖、车门、遮阳板文字区存在强反光、过曝、发白、深阴影或亮斑盖住字符 → 该子区域文字证据作废，reason 须写明成像不可靠。\n"
-            "V3. 格栅、大灯、保险杠、车标等硬结构整体一致时，默认 normal；仅凭文字可见性不同不能改判套牌。\n"
-            "V4. 导流罩文字须先对齐子区域（deflector_front_center / deflector_side_model）；跨子区域或正侧面混比 → 证据无效。\n"
-            "V5. 仅当同一子区域、两侧都清晰可读时，才可用品牌/厂家字样冲突作为套牌依据。\n"
-            "V6. reason 若写「图1无、图2有」或相反，必须同时写明两侧可读性（清晰/过曝/阴影/反光）；未写明则 label 必须为 normal。\n"
-            "V7. 清晨顶面直射、夜间路灯或车头灯、强背光等大光比场景下，导流罩仅一张可见文字 → 优先归光照干扰，不得写成稳定标识差异。\n\n"
-            "同位比对原则：\n"
-            "1. 只比两图「同一固定部位、同一朝向面」上的长期标识或稳定结构；禁止图1一面文字对图2另一面。\n"
-            "2. 无法确认同一部位、同一朝向面 → 文字差异无效，改比格栅、车标、保险杠、后视镜等硬结构，或判 normal。\n"
-            "3. 引用文字/标识差异前必须先完成部位对齐；未对齐则无效。\n"
-            "4. 禁止「都在导流罩上」即同部位；仅 deflector_front_center（正前中央品牌条）与 deflector_side_model（侧面型号条）可互比，且须同子区域。\n"
-            "5. 引擎盖、车门、遮阳板：左对左、右对右、中央对中央；禁止侧面字对正面字。\n\n"
+            "同位比对原则（最高优先级，必须优先遵守）：\n"
+            "1. 只允许比较两张图中「同一固定部位、同一朝向面」上的长期标识或稳定结构；禁止把图1某一面上的文字与图2另一面上的文字直接对比。\n"
+            "2. 若无法确认两图看到的是同一部位、同一朝向面（例如一张是导流罩正面、另一张是导流罩侧面），则该文字差异无效，不得单独作为 fake_plate 依据，应改比格栅、车标、保险杠、后视镜总成等硬结构，或判 normal。\n"
+            "3. 引用任何文字/标识差异前，必须先完成部位对齐；未对齐则视为无效证据。\n"
+            "4. 禁止把「都在导流罩上」当成「同部位」；导流罩至少分两个子区域，只能同子区域互比：\n"
+            "   - deflector_front_center：导流罩正前/朝镜头一侧的中央品牌条。\n"
+            "   - deflector_side_model：导流罩侧面型号条。\n"
+            "6. 引擎盖固定标识、车门固定编号区、遮阳板文字区同样适用同位比对：左门对左门、右门对右门、引擎盖中央对引擎盖中央；不能拿一张图的侧面字去对另一张图的正面字。\n\n"
             "总原则：\n"
-            "6. 只依据稳定结构和稳定标识；不得单凭色号深浅、亮暗、反光、阴影、过曝、污渍、角度、开灯、打码下结论。\n"
-            "7. 建筑物遮挡、玻璃反光、夜间灯光、单边开灯、车外投影等默认成像干扰，不是套牌依据。\n"
-            "8. 车内物品、单边车牌打码、货物橙黄编号牌、纯数字编号块、车牌黑块打码，均不是车体结构或身份标识依据。\n"
-            f"9. 若任一张图主要为过磅设备、建筑物、招牌等非车头主体，或主体过小、过糊、强反光、过曝、遮挡、靠猜测 → 写「输入图片质量太差，AI无法判断、{fallback_conclusion_text}」，label 设为 {low_similarity_fallback_label}，勿展开长篇分析。\n"
-            "10. 关键证据不可靠时不得为得出 fake_plate 而放宽标准；快速收束结论。\n\n"
+            "7. 只允许依据车头稳定结构和稳定标识做判断，不能只凭颜色深浅、亮暗变化、反光、阴影、局部发白、过曝、污渍、积灰、泥渍、轻微角度变化、开灯状态、打码状态或拍摄条件下结论。\n"
+            "8. 建筑物遮挡、背光、玻璃反光、车头强反光、雨刷阴影、车外物体投影、夜间灯光、单边开灯、局部过曝、玻璃上的暗带，都默认属于成像或光照干扰，不是 fake_plate 依据。\n"
+            "9. 判定依据只能从车体本身寻找。车内驾驶室物品、人物姿态、摆件、纸巾盒、挂饰、瓶子、包、座椅套、遮阳帘，以及单边车牌打码或未打码，均不能作为车头结构差异依据。\n"
+            f"10. 如果其中一张图里没有清晰可见的车头主体，而主要是过磅自助机、建筑物、背景招牌、地磅设备、路面设施或其他非车辆对象，这本身就属于输入图片质量太差的情况；不要把这些场景设备与另一张图中的车辆做 fake_plate 比较，而要明确说明“输入图片质量太差，AI无法判断，{fallback_conclusion_text}”，并在最后输出 {low_similarity_fallback_label}。\n\n"
+            "11. 先做资格审查，再做细节比对：如果关键区域本身不可稳定比较，例如主体过小、严重模糊、强反光、过曝、遮挡、只能看到局部疑似字符或只能靠猜测，不要继续展开长篇分析，而要尽快按输入图片质量太差处理。\n"
+            "12. 不要围绕同一处不可靠区域反复比较，不要为了得出 fake_plate 而放宽证据标准；只要关键证据不可靠，就应停止深挖并快速收束到最终结论。\n\n"
             "高优先级观察项：\n"
-            "11. 优先比：格栅结构、大灯外轮廓、保险杠、后视镜总成形状与分色、车标轮廓与图案、驾驶室与引擎盖整体造型。\n"
-            "12. 引擎盖固定标识、导流罩同子区域喷涂字、车门编号、后视镜分色——仅在同部位对齐、双侧清晰、非反光/过曝/遮挡造成时，可作辅证；不含一侧有字一侧无字（见 V1）。\n"
-            "13. 车标不比发光/反光强弱；大灯比外轮廓与布局，开灯差异不算结构差异；后视镜比总成主体形状与分色。\n\n"
+            "13. 重点比较这些稳定特征：车头整体造型、格栅整体结构、大灯外轮廓、保险杠主体结构、后视镜总成主体形状与分色、车标结构、引擎盖整体造型与固定标识、车门固定文字或编号区域、导流罩长期文字区域（须先完成同位对齐）。\n"
+            "14. 以下内容不应被当作普通装饰忽略：引擎盖中央或前脸固定标识、稳定品牌字样、固定翼形标、导流罩同子区域长期喷涂文字、车门固定编号区域、后视镜总成的主体造型与配色分区。这些若在同部位对齐且清晰可见、内容或结构明显不同，可以作为 fake_plate 依据。\n"
+            "15. 例如引擎盖上的固定标识或字样、导流罩同子区域长期喷涂文字、后视镜外壳主体配色和总成造型，如果不是临时贴纸、反光或偶发遮挡造成，而是清晰稳定且部位对齐的差异，应视为有效差异，而不是普通装饰。\n\n"
             "低优先级或排除项：\n"
-            "14. 细小装饰、后加装件、格栅条幅亮暗与金属光泽、跨面文字差异 → 不得单独作套牌依据。\n"
-            "15. 文字区仅当两图同子区域均清晰、无强反光/过曝/阴影遮盖时，才可据文字内容判异；任一侧不可靠则作废（见 V1–V2），禁止写成稳定标识差异。\n\n"
-            "光照与成像（摘要）：\n"
-            "过磅现场正午直射、清晨顶光、傍晚斜射、夜间点光源、背光等常使导流罩/车门文字一侧清晰一侧不可见或顶面发白洗字，属成像差异。车身色号在早晚光下可漂移；硬结构一致时色号差判 normal。车门编号仅双侧清晰且确认非光照洗掉才可采信。顶棚/雨棚致一侧深阴影、另一侧明亮时，禁止写「图1无、图2有」。\n"
-            "顶示廓灯（子区域=deflector_top_lamp_strip）：两侧均能见灯座或透镜外形才可比，否则写单侧不可读、成像差异 → normal。雨刷位置不算结构差异；玻璃上字须确认固定标识且双侧清晰。\n\n"
-            "思考顺序（按序执行，不可跳步）：\n"
-            "步骤1 硬结构：格栅、大灯、保险杠、车标、后视镜 → 整体一致则记下：仅凭文字差异不得判套牌（V3）。\n"
-            "步骤2 子区域对齐：导流罩等文字须 deflector_front_center 或 deflector_side_model 对齐；不对齐则文字全部作废。\n"
-            "步骤3 可读性：各涉及子区域分别判图1/图2 为清晰、过曝、阴影或反光；任一侧不可靠则该子区域文字作废（V2）。\n"
-            "步骤4 定案：仅当硬结构有明确稳定差异，或（同子区域 + 双侧清晰 + 品牌/厂家级文字明显冲突且不触发 V1–V3）时 → fake_plate；否则 normal。\n\n"
+            "16. 细小装饰块、局部颜色块、后加装小配件，默认不作为车头主体结构差异依据，不能仅凭这些普通装饰细节判为 fake_plate。\n"
+            "17. 车头区域如果出现橙色或黄色编号牌、危险品或货物标识牌、纯数字编号块，这类内容通常是运载货物或运输类别标识，不属于车辆身份标识；即使两图数字不同，也不能单独作为 fake_plate 依据。\n"
+            "18. 程序可能会对真正车牌区域打上黑色矩形框，这只是预处理结果，不属于车辆本体结构或稳定标识；不能把黑色矩形框、黑块大小差异、黑块有无，当成 fake_plate 依据。\n"
+            "19. 格栅条幅细节、局部纹理、表面光泽、亮面暗面变化，容易受阳光、反光、污渍和曝光影响；如果差异主要表现为条幅亮暗、表面反光或金属光泽强弱不同，不能直接作为结构差异依据。\n"
+            "20. 跨面文字差异（如导流罩正面对侧面、左门文字对右门文字）一律无效，不得写入 fake_plate 理由。\n\n"
+            "特殊判读规则：\n"
+            "21. 车标要比较轮廓、外框、内部图案和安装位置，不要只看发光颜色、反光强弱或是否发白。\n"
+            "22. 大灯要比较总轮廓、外框形状、安装位置和整体布局；如果一张图开灯、另一张不开灯，不能把被灯光遮住的内部灯组细节差异当成 fake_plate 依据。\n"
+            "23. 导流罩、引擎盖顶部遮阳板、车头文字区域、喷涂标识区域，只有在两张图「同一子区域」都清晰可见、部位对齐、没有被强反光、过曝、发白、眩光、污渍或阴影遮盖时，才可以依据文字内容是否明显不同来判断 fake_plate。\n"
+            "24. 对纯数字编号块、橙色编号牌、黑色车牌打码框，要优先判断它们是不是货物标识或预处理黑块，而不是车辆稳定标识；这类区域默认降权，除非你能明确确认它不是货物编号牌也不是打码框。\n"
+            "25. 后视镜不能只看反光亮暗，但要比较后视镜总成主体形状、外壳分色、安装方式和支架关系；如果这些差异清晰稳定可见，属于有效差异。\n\n"
+            "强光照射、色号漂移与“一侧有字一侧无字”专节（高优先级防误判）：\n"
+            "26. 过磅现场常见正午直射、傍晚斜射、单侧强逆光：会导致车头大面积过曝发白、导流罩顶部文字被亮斑淹没、车门固定编号区反光看不清、前围贴纸/遮阳板小字在一张图清晰另一张图完全不可见——这些都属于成像差异，不是车辆本体没有该标识。\n"
+            "27. 只要任意一侧导流罩/遮阳板/车门文字区存在强反光、过曝、发白、深阴影、字符被亮斑盖住或只能勉强辨认，就必须把该文字证据视为不可靠，不能写成“稳定标识差异”。\n"
+            "28. 车门编号区在眩光、背光、侧角、离远近下经常单侧不可读；只有两侧车门对应区域都足够清晰、部位对齐，且能确认另一侧确实没有任何喷涂/贴纸编号（不是被光照洗掉）时，才可把车门文字差异作为依据。\n"
+            "29. 车身主色（红/橙/深红/黄橙/银灰）在早晚巨大光线差异下会显著漂移：傍晚暖光可把红色拍成橙黄，正午强光可把深灰拍成亮银，阴影下可把红色拍成暗褐。应优先比较格栅造型、车标结构、驾驶室轮廓、保险杠形态、后视镜总成等不受单次曝光左右的硬结构。若硬结构一致，即使色号差异明显，也应判 normal，并在 reason 中写明可能为强光/时段导致的表观色偏。\n\n"
+            "顶棚阴影与顶边灯：\n"
+            "- 一侧因顶棚、雨棚或建筑物遮挡导致车顶/导流罩上沿深阴影，另一侧同区域明亮可见灯、字或装饰时，禁止写「图1无、图2有」。\n"
+            "- 顶黑边/示廓灯/工作小圆灯（子区域=deflector_top_lamp_strip，勿用 deflector_front_center）：仅当两侧都能看见灯座或透镜外形（不是仅有光斑或无光斑）才可比较；否则写「单侧不可读，成像差异」并判 normal。\n\n"
+            "挡风玻璃与雨刷：\n"
+            "- 雨刷臂、雨刷片的位置与角度为临时状态，不得作为 fake_plate 依据，不得描述为「标识缺失」。\n"
+            "- 玻璃上文字/标识须两侧清晰且确认为车体固定喷涂或贴附才可比较；无法确认是否为固定标识时判 normal。\n\n"
+
+            "思考顺序：\n"
+            "32. 先确认两张图里是否都存在清晰可比较的车头主体；如果有一张图主要拍到的是设备、场景或非车辆对象，不要拿这些非车辆对象做结构差异依据，而应按图片质量太差处理。\n"
+            "33. 分别列出每张图清晰可见的长期标识及其部位标签（含导流罩子区域 deflector_front_center / deflector_side_model）。\n"
+            "34. 求两图「同部位、同朝向面」的交集；若文字相关交集为空或无法确认对齐，则文字证据作废，不得仅凭文字判 fake_plate。\n"
+            "35. 先判断是否存在单侧强光/过曝/深阴影导致的导流罩、车门、前围文字不可比；若有，直接把这些文字差异归入光照干扰，改比格栅、车标、驾驶室硬结构。\n"
+            "36. 再判断车身红橙/亮暗差异是否可用时段光照解释；若能，不得单独据此判 fake_plate。\n"
+            "37. 只有在同子区域文字双侧都清晰、部位对齐、且（硬结构也存在明确稳定差异，或同子区域品牌/厂家级文字明显冲突）时，才可判 fake_plate。\n"
+            "38. 最后明确说明你依据的是稳定结构差异、同位对齐后的稳定标识差异，还是把跨面文字、导流罩正侧混比、车门编号、色号差异、贴纸可见性差异判定为无效证据或光照/反光/曝光干扰。\n\n"
             "分类规则：\n"
-            "- fake_plate：须满足——硬结构存在清晰稳定差异且不能用光照、反光、过曝、遮挡等解释；或同子区域、双侧清晰可读、部位对齐且品牌/厂家级文字明显冲突（且不触发一票否决 V1–V3）。\n"
-            "- normal：硬结构一致且仅文字一侧可见一侧不可见 → normal；或差异可归因光照/反光/过曝/污渍/遮挡/跨面混比/货物牌/打码/普通装饰/成像不可靠。\n\n"
+            "- fake_plate：车头存在清晰、稳定、不能用光照、反光、过曝、污渍、遮挡、投影、开灯状态、车内物品或打码状态解释的主体结构差异；或存在同部位对齐、双侧清晰可读且内容明显冲突的固定文字/品牌字样（含导流罩同子区域长期喷涂文字）、引擎盖固定标识、后视镜差异。\n"
+            "- normal：车头结构与标识整体一致，或者看不出清晰稳定的异常差异；差异主要来自光照、反光、过曝、污渍、遮挡、投影、拍摄条件、开灯状态、车内物品、货物编号牌、打码框、普通装饰细节、打码状态不一致，或文字差异来自部位不对齐/跨面混比。\n\n"
             "输出要求：\n"
             "请按以下 JSON 格式输出，且只能输出一个 JSON 对象，不要输出额外解释：\n"
             "{\n"
             '  "label": "fake_plate 或 normal",\n'
-            f'  "reason": "优先按模板：子区域=…；图1可读性=清晰|过曝|阴影|反光；图2可读性=…；硬结构=一致|不一致；文字证据=采纳|作废(原因)。'
-            f"一句到两句中文；图片质量太差时写输入图片质量太差、AI无法判断、{fallback_conclusion_text}，label 设为 {low_similarity_fallback_label}；"
-            "同部位对齐=否或任一侧不可读或触发 V1–V2 时 label 必须为 normal；"
-            "禁止在 reason 写稳定标识差异的同时未说明两侧可读性；"
-            'reason 只用中文，禁止出现 fake_plate、normal 等英文 label 词，可写套牌、正常、不能据此判套牌、不作为套牌依据"\n'
+            f'  "reason": "一句到两句中文说明；图片质量太差或关键证据不可靠时写输入图片质量太差、AI无法判断、{fallback_conclusion_text}，并将 label 设为 {low_similarity_fallback_label}；'
+            "提到文字/标识差异时必须附带子区域、图1、图2、同部位对齐字段；"
+            "同部位对齐=否或任一侧不可读时 label 必须为 normal；"
+            'reason 只用中文描述，禁止出现 fake_plate、normal 等英文 label 词，可写套牌、正常、不能据此判套牌、不作为套牌依据"\n'
             "}\n"
         )
 
@@ -106,13 +120,8 @@ class VehicleCheck:
             "- change_trailer：上述可比对特征中存在清晰稳定差异，且非光照/脏污/货物造成。\n"
             "- normal：可比对特征一致，或证据不足、或差异可归因光照/阴影/货物/篷布/成像。\n\n"
             "输出要求：\n"
-            "请按以下 JSON 格式输出，且只能输出一个 JSON 对象，不要输出额外解释：\n"
-            "{\n"
-            '  "label": "change_trailer 或 normal",\n'
-            '  "reason": "一句到两句中文，点明栏型/轴数/侧挂附件等具体依据，禁止空泛；'
-            "证据不足或差异可归因光照/阴影/货物/篷布/成像时 label 必须为 normal；"
-            'reason 只用中文，禁止出现 change_trailer、normal 等英文 label 词，可写换挂、正常、不能据此判换挂"\n'
-            "}\n"
+            "1. 分两段：前1到2句写依据（点明栏型/轴数等，禁止空泛“栏板式一致”）；最后一行单独写 change_trailer 或 normal。\n"
+            "2. 最后一行整行只能是 change_trailer 或 normal，无标点无中文。\n"
         )
 
     def _extract_json_payload(self, text: str) -> dict:
@@ -181,65 +190,6 @@ class VehicleCheck:
 
         if label == "unknown":
             print("车头 AI JSON 解析失败，返回 unknown 交由上层回退")
-
-        return {"label": label, "reason": reason}
-
-    def _normalize_tail_label(self, value: str) -> str:
-        text = str(value or "").strip().lower()
-        if not text:
-            return "unknown"
-
-        if text in {"normal", "正常", "same", "一致"}:
-            return "normal"
-        if text in {
-            "change_trailer",
-            "换挂",
-            "换车厢",
-            "trailer_changed",
-            "different_trailer",
-        }:
-            return "change_trailer"
-        if text in {"unknown", "无法判断", "无法判定", "undetermined"}:
-            return "unknown"
-
-        raw = str(value or "").strip()
-        if raw in self.TAIL_VALID_LABELS:
-            return raw
-        return "unknown"
-
-    def _fallback_tail_label_from_text(self, text: str) -> str:
-        lines = [line.strip().lower() for line in str(text or "").splitlines() if line.strip()]
-        if not lines:
-            return "unknown"
-
-        prefixes = ("label:", "label：", "结论:", "结论：", "result:", "result：")
-        for line in reversed(lines[-3:]):
-            normalized = line.strip(" `\"'")
-            for prefix in prefixes:
-                if normalized.startswith(prefix):
-                    normalized = normalized[len(prefix):].strip()
-                    break
-            if normalized in self.TAIL_VALID_LABELS:
-                return normalized
-
-        last_line = lines[-1].strip(" `\"'")
-        if last_line in self.TAIL_VALID_LABELS:
-            return last_line
-        return "unknown"
-
-    def _parse_tail_response(self, full_output: str) -> dict:
-        payload = self._extract_json_payload(full_output)
-        label = self._normalize_tail_label(payload.get("label"))
-        if label == "unknown":
-            label = self._fallback_tail_label_from_text(full_output)
-
-        reason = str(payload.get("reason") or "").strip()
-        if not reason:
-            lines = [line.strip() for line in full_output.splitlines() if line.strip()]
-            reason = lines[0] if lines else ""
-
-        if label == "unknown":
-            print("车尾 AI JSON 解析失败，返回 unknown 交由上层回退")
 
         return {"label": label, "reason": reason}
 
@@ -414,44 +364,6 @@ class VehicleCheck:
             print("请检查 Ollama 服务是否启动，以及模型名是否已拉取。")
             return {"label": "unknown", "reason": ""}
 
-    def _call_tail_model_with_reason(
-        self,
-        prompt: str,
-        img1_path: str,
-        img2_path: str,
-    ) -> dict:
-        if not Path(img1_path).exists() or not Path(img2_path).exists():
-            self.last_error = f"image not found: {img1_path} | {img2_path}"
-            return {"label": "unknown", "reason": ""}
-
-        try:
-            self.last_error = ""
-            self.last_raw_output = ""
-            stream = ollama.chat(
-                model=self.model_name,
-                messages=[{
-                    "role": "user",
-                    "content": prompt,
-                    "images": [img1_path, img2_path],
-                }],
-                stream=True,
-            )
-
-            print("\n--- AI分析中 ---\n")
-            for chunk in stream:
-                content = chunk.get("message", {}).get("content", "")
-                if content:
-                    print(content, end="", flush=True)
-                    self.last_raw_output += content
-            print("\n\n--- AI分析结束 ---\n")
-
-            return self._parse_tail_response(self.last_raw_output)
-        except Exception as e:
-            self.last_error = str(e)
-            print(f"调用异常: {e}")
-            print("请检查 Ollama 服务是否启动，以及模型名是否已拉取。")
-            return {"label": "unknown", "reason": ""}
-
     def check_head(self, head1_path: str, head2_path: str) -> str:
         payload = self._call_head_model_with_reason(
             self._build_head_prompt(),
@@ -464,15 +376,12 @@ class VehicleCheck:
         return label
 
     def check_tail(self, tail1_path: str, tail2_path: str) -> str:
-        payload = self._call_tail_model_with_reason(
+        return self._call_model(
             self._build_tail_prompt(),
             tail1_path,
             tail2_path,
+            valid_keywords=["change_trailer", "normal"]
         )
-        label = str(payload.get("label") or "unknown")
-        if label == "unknown":
-            return "unknown"
-        return label
 
     def _call_model_with_reason(
         self,
@@ -534,10 +443,11 @@ class VehicleCheck:
         )
 
     def check_tail_with_reason(self, tail1_path: str, tail2_path: str) -> dict:
-        return self._call_tail_model_with_reason(
+        return self._call_model_with_reason(
             self._build_tail_prompt(),
             tail1_path,
             tail2_path,
+            valid_keywords=["change_trailer", "normal"]
         )
 
 

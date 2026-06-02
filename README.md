@@ -1135,8 +1135,70 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
   - 删除 `_build_prompt()`、`check_vehicle()`（整车单轮三分类，主流程已改为分部位 `check_head` / `check_tail`）。
   - 删除 `_build_diff_analysis_prompt()`、`analyze_differences()`（差异描述改由 `ai_*_reason` 承担，GUI 不再调用）。
   - 保留 `_build_tail_prompt()`、`check_tail_with_reason()`（主视角车尾回退 AI 仍在用）。
+  
+### 2026-05-31
 
+**差异总结展示（`my_predict_gui_new.py`）**
+- 移除 `最终差异总结` 的 `_shorten_reason_text` 截断逻辑，套牌/换挂场景下输出完整 AI 理由，与上方「AI 判定理由」保持一致。
 
+**车头 AI（`qwen_vl/predict_ai.py`）**
+- 输出格式由「最后一行英文结论」改为 **JSON**（`label` + `reason` 分离），避免 reason 中出现「不作为 fake_plate 依据」等表述时被全文子串误匹配成套牌。
+- 提示词新增 **顶棚阴影与顶边灯**、**挡风玻璃与雨刷** 专节：单侧阴影不可写「图1无、图2有」；雨刷位置不得作为套牌依据；顶边灯使用子区域 `deflector_top_lamp_strip`。
 
+**尾部视角车尾 AI（`qwen_vl/predict_ai_shijiao2.py`）**
+- 新增 **第 0 步成对可比对性审查**：任一侧未拍到挂车尾部时，必须输出「无法判断」并回退主视角车尾 AI，禁止用牵引车头与挂车颜色差异判换挂。
+- JSON 增加 `img1_trailer_rear_visible`、`img2_trailer_rear_visible`、`pair_comparable` 字段；`structure_consistency` 支持「无法确认」。
+- 解析层 `_apply_comparability_rules`：当不可比对、或换挂但号牌/结构无明确不一致证据时，自动降级为「无法判断」，触发主视角车尾 AI 回退。
+
+## 2026-06-02
+
+### 车头 AI（`qwen_vl/predict_ai.py`）
+
+- **[提示词重构] 引入一票否决 V1–V7（最高优先级）**
+  - 明确「一侧有字一侧无字 / 字符看不清」不得单独判套牌，须先归因为过曝、反光、阴影、背光或时段光照；
+  - 任一侧文字区强反光、过曝、深阴影时该子区域文字证据作废；
+  - 格栅/大灯/保险杠/车标等硬结构整体一致时默认 `normal`，禁止仅凭文字可见性改判套牌；
+  - `reason` 若写「图1无、图2有」类表述，必须同时写明两侧可读性，否则 `label` 必须为 `normal`。
+  - 效果：针对过磅现场清晨顶光、夜间点光源、大光比背光下导流罩「单侧可见文字」误判套牌的问题做硬性约束。
+
+- **[提示词优化] 规则压缩与四步思考顺序**
+  - 将原先分散的强光、色号漂移、顶棚阴影、雨刷等专节合并为「光照与成像（摘要）」；
+  - 思考顺序固定为：步骤1 硬结构 → 步骤2 子区域对齐 → 步骤3 可读性 → 步骤4 定案，禁止跳步。
+
+- **[输出要求] JSON `reason` 结构化模板**
+  - 要求优先填写：子区域、图1/图2 可读性（清晰/过曝/阴影/反光）、硬结构一致与否、文字证据采纳或作废原因；
+  - 触发 V1–V2 或同部位未对齐时 `label` 必须为 `normal`；
+  - `reason` 禁止出现 `fake_plate`、`normal` 等英文 label 词，避免与解析层冲突。
+
+### 主视角车尾 AI（`qwen_vl/predict_ai.py`）
+
+- **[输出格式] 主视角车尾裁切 AI 同步改为 JSON**
+  - `_build_tail_prompt()` 输出 `label`（`change_trailer` / `normal`）+ `reason` 分离；
+  - 新增 `_parse_tail_response`、`_call_tail_model_with_reason`，与车头解析路径拆分，不再共用英文末行关键词提取。
+
+- **[解析层] 车头/车尾分路调用**
+  - `check_head` / `check_head_with_reason` 走 `_call_head_model_with_reason` + `_parse_head_response`；
+  - `check_tail` / `check_tail_with_reason` 走 `_call_tail_model_with_reason` + `_parse_tail_response`；
+  - 效果：车头、主视角车尾均统一为 JSON 解析，降低 reason 正文子串误匹配 label 的风险。
+
+### 尾部视角车尾 AI（`qwen_vl/predict_ai_shijiao2.py`）
+
+- **[提示词优化] 新增“单侧编号不可用于换挂”硬约束并强调结构优先**
+  - 新增“编号可用性对称规则”：仅当两侧挂车号牌/放大号都清晰完整可读时，才可用编号一致/不一致定案；
+  - 任一侧不可读、缺失、眩光、过曝或仅见局部字符时，`plate_or_number_consistency` 必须填“无法确认”，放弃编号比较并转结构链路；
+  - 新增“编号来源白名单”：编号仅可来自挂车本体合法区域（号牌安装区、尾部放大号规范区域、车架正式编号区）；侧板喷字、货台喷字、背景指示屏/道闸屏/建筑牌编号一律排除。
+
+- **[反例约束] 压制“单侧有号牌 + 单侧侧板喷字”误判换挂**
+  - 明确：若图1号牌可读、图2号牌不可见，且图2仅出现侧板喷字或其他非号牌文字（如 `桂BA0596`），不得写成“两侧放大号不一致”；
+  - 必须写明“编号证据不对称，已放弃编号比较，转结构比对”。
+
+- **[链路强化] 编号不可靠时，Tier-A 成为主判断依据**
+  - 在 `Step1` 明确“单侧编号禁止定换挂”；
+  - 在 `Step2` 明确“后开口 + 侧围”为编号不可靠时的主判断依据，着重比较侧挡板、前/后挡板、顶棚/顶架等稳定结构。
+
+### 备份整理
+
+- 删除 `备份/0412`、`0507`、`0508`、`0510`、`0511` 等过期快照；
+- 新增 `备份/0531/`（`my_predict_gui_new.py`、`predict_ai.py`、`predict_ai_shijiao2.py`），作为 5 月末基线留存。
 
 

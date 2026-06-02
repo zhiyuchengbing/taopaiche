@@ -2138,19 +2138,6 @@ def _clean_reason_text(reason: Optional[str]) -> str:
     return text
 
 
-def _shorten_reason_text(reason: Optional[str], limit: int = 80) -> str:
-    text = _clean_reason_text(reason)
-    if not text:
-        return ""
-    for sep in ("；", "。", "\n"):
-        if sep in text:
-            text = text.split(sep)[0].strip()
-            break
-    if len(text) > limit:
-        text = text[:limit].rstrip("，,；;。.") + "..."
-    return text
-
-
 def _build_label_reason_text(label: Optional[str], reason: Optional[str], *, part: str) -> str:
     pretty_label = _normalize_head_display_label(label) if part == "head" else _normalize_tail_display_label(label)
     clean_reason = _clean_reason_text(reason) or "未获得稳定结论"
@@ -2200,17 +2187,17 @@ def _populate_ai_trace_texts(result: Dict[str, Any], head_prob: Optional[float])
         ):
             final_diff_summary = f"套牌：车头相似度低于阈值，车头OCR为“{text1} / {text2}”，判定为套牌"
         elif head_ai_used and ai_head_result == "fake_plate":
-            short_reason = _shorten_reason_text(result.get("ai_head_reason")) or "车头AI判定为套牌"
-            final_diff_summary = f"套牌：{short_reason}"
+            full_reason = _clean_reason_text(result.get("ai_head_reason")) or "车头AI判定为套牌"
+            final_diff_summary = f"套牌：{full_reason}"
         elif ocr_match is False:
             final_diff_summary = f"套牌：车头OCR不一致：'{text1}' vs '{text2}'"
     elif case_type == "change_trailer":
         if main_tail_ai_display_text:
-            short_reason = _shorten_reason_text(result.get("ai_tail_reason"))
-            final_diff_summary = f"换挂：{short_reason}" if short_reason else "换挂"
+            full_reason = _clean_reason_text(result.get("ai_tail_reason"))
+            final_diff_summary = f"换挂：{full_reason}" if full_reason else "换挂"
         elif tail34_ai_display_text:
-            short_reason = _shorten_reason_text(result.get("tail_second_check_reason"))
-            final_diff_summary = f"换挂：{short_reason}" if short_reason else "换挂"
+            full_reason = _clean_reason_text(result.get("tail_second_check_reason"))
+            final_diff_summary = f"换挂：{full_reason}" if full_reason else "换挂"
     elif case_type == "normal":
         final_diff_summary = None
 

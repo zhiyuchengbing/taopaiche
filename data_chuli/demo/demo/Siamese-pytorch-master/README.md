@@ -4,16 +4,21 @@
 
 ## 目录
 1. [仓库更新 Top News](#仓库更新)
-2. [注意事项 Attention](#注意事项)
-3. [所需环境 Environment](#所需环境)
-4. [文件下载 Download](#文件下载)
-5. [预测步骤 How2predict](#预测步骤)
-6. [训练步骤 How2train](#训练步骤)
-7. [参考资料 Reference](#Reference)
+2. [更新日志 Changelog](#更新日志)
+3. [注意事项 Attention](#注意事项)
+4. [所需环境 Environment](#所需环境)
+5. [文件下载 Download](#文件下载)
+6. [预测步骤 How2predict](#预测步骤)
+7. [训练步骤 How2train](#训练步骤)
+8. [参考资料 Reference](#Reference)
 
 ## Top News
 **`2022-04`**:**进行了大幅度的更新，支持step、cos学习率下降法、支持adam、sgd优化器选择、支持学习率根据batch_size自适应调整。**  
 BiliBili视频中的原仓库地址为：https://github.com/bubbliiiing/siamese-pytorch/tree/bilibili
+
+## 更新日志
+
+
 
 ## 注意事项
 **训练Omniglot数据集和训练自己的数据集可以采用两种不同的格式**。需要注意格式的摆放噢！  
