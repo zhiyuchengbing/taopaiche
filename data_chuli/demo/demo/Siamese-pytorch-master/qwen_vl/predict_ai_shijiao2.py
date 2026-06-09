@@ -49,8 +49,8 @@ class TailVehicleCheck:
             "- 结构相似禁止强读编号：Tier-A 后开口与侧围初步一致时，禁止凭“隐约不同字符”强行定编号不一致；仍不可靠则放弃编号、以结构定案。\n"
             "- 编号确凿不同无需结构证实：双侧同类编号均清晰完整且关键位明确不同 → 直接判换挂，structure_consistency 填 未检验。\n"
             "- 单侧编号禁止定换挂：仅一侧可读到挂车号牌/放大号，另一侧不可见或不可靠时，必须放弃编号比较，着重比较侧挡板、前/后挡板、顶棚/顶架结构。\n\n"
-            "Step2 Tier-A（后开口 + 侧围，核心结构，编号不可靠时的主判断依据）：\n"
-            "- 任一项结构明确不一致即可判换挂（structure_consistency=不一致）。\n"
+            "Step2 Tier-A（后开口 + 侧围，核心结构，仅当 plate_or_number_consistency=无法确认 时作为主判断依据）：\n"
+            "- 任一项结构明确不一致即可判换挂（structure_consistency=不一致）；但若 plate_or_number_consistency=一致（H2 已成立），Tier-A 结构结论一律无效，不得据此判换挂。\n"
             "- 禁止用光照、积灰、货物、篷布解释 Tier-A 的硬冲突。\n"
             "- 色相不可信规则：任一侧存在「夜间欠曝、顶棚阴影、积灰泛白、强反光」→ 该侧 body_hue 标记为「色相不可信」，不得单独作为换挂依据。\n"
             "- 几何优先：尾门/侧围比对须先数金属外框线、开口/窗洞数量、立柱/横梁位置与布局，再判实心/镂空/组合；禁止仅凭洞内或板面黄/黑/亮/暗填色定结构型。\n"
@@ -73,15 +73,16 @@ class TailVehicleCheck:
             "  分别记录每张图挂车尾部的 body_hue（红/橙/黄/蓝/绿/白/灰/黑褐/不可辨）与 appearance_note（光照深暗/积灰/顶棚阴影/反光发白/无异常）。\n"
             "  - 禁止用牵引车头色相与挂车尾部色相比较。\n"
             "  - 仅 body_hue 不同且 Tier-A 全部一致 → 视为光照或脏污，不能单独换挂。\n"
-            "  - body_hue 不同且 Tier-A 任一项不一致 → 换挂，reason 写明色相与门型/栏型均不同。\n"
+            "  - body_hue 不同且 Tier-A 任一项不一致 → 换挂，reason 写明色相与门型/栏型均不同；但若 plate_or_number_consistency=一致，本条不适用。\n"
             "  - 禁止在门型、栏高、镂空型已冲突时，仍写“阴影或顶棚导致色变”。\n\n"
             "Step4 Tier-B（尾灯/反光条/轴数/保险杠/挡泥板/号牌架/侧挂附件）：\n"
             "  尾灯总成外形(方灯/圆灯组合等)、尾部横反光条有无、轴数/可见轮组、下护栏保险杠形态、挡泥板、号牌架形态、侧挂附件。\n"
             "  Tier-B 不能压过 Tier-A：门型或侧围已冲突时，不得用“三轴、尾灯位置类似”判正常。\n"
             "  只有确认两侧为同一挂车本体且对应位置确实无同类安装位时，才可因 Tier-B 差异判换挂；不能仅凭一侧看不见就下结论。\n\n"
             "Step5 结论：\n"
+            "  - 双侧同类编号清晰完整且关键位一致 → 正常（H2 优先），plate_or_number_consistency 填“一致”，structure_consistency 填“未检验”，禁止再引用 Tier-A/Tier-B 结构差异。\n"
             "  - 双侧同类编号清晰完整且关键位明确不同 → 换挂，plate_or_number_consistency 填“不一致”，structure_consistency 填“未检验”。\n"
-            "  - Tier-A 任一项不一致 → 换挂，structure_consistency 填“不一致”。\n"
+            "  - Tier-A 任一项不一致 → 换挂，structure_consistency 填“不一致”；但若 plate_or_number_consistency=一致，本条不适用，必须判正常。\n"
             "  - Tier-A 一致且 Tier-B 明确不一致（双侧清晰） → 换挂。\n"
             "  - Tier-A 与 Tier-B 均一致 → 正常，structure_consistency 填“一致”。\n"
             "  - 关键 Tier-A 项无法确认且无结构冲突疑点：仅在号牌不可靠且结构也无法比对时，输出无法判断并回退主视角车尾图。\n\n"
@@ -263,14 +264,69 @@ class TailVehicleCheck:
                 "structure_consistency": structure_consistency,
             }
 
-        return {
-            "label": label,
-            "reason": reason,
+        return self._apply_h2_plate_match_guard(
+            label=label,
+            reason=reason,
+            img1_visible=img1_visible,
+            img2_visible=img2_visible,
+            pair_comparable=pair_comparable,
+            plate_consistency=plate_consistency,
+            structure_consistency=structure_consistency,
+        )
+
+    def _apply_h2_plate_match_guard(
+        self,
+        *,
+        label: str,
+        reason: str,
+        img1_visible: str,
+        img2_visible: str,
+        pair_comparable: str,
+        plate_consistency: str,
+        structure_consistency: str,
+    ) -> dict:
+        """H2 硬拦截：双侧号牌/放大号一致时强制正常，结构结论无效。"""
+        h2_reason = "双侧挂车号牌/放大号关键位一致，按H2规则直接判定正常，结构比对结论无效"
+        base_result = {
             "img1_trailer_rear_visible": img1_visible,
             "img2_trailer_rear_visible": img2_visible,
             "pair_comparable": pair_comparable if pair_comparable != "未知" else "是",
             "plate_or_number_consistency": plate_consistency,
             "structure_consistency": structure_consistency,
+        }
+
+        comparable = (
+            pair_comparable != "否"
+            and img1_visible != "否"
+            and img2_visible != "否"
+        )
+        if not comparable or plate_consistency != "一致":
+            return {
+                "label": label,
+                "reason": reason,
+                **base_result,
+            }
+
+        if label != "正常":
+            original_label = label
+            original_reason = reason
+            if original_reason:
+                reason = f"{h2_reason}（原模型结论：{original_label}，{original_reason}）"
+            else:
+                reason = h2_reason
+            print(
+                f"[tail-ai] H2 guard adjusted label: {original_label!r} -> '正常' "
+                f"(plate_or_number_consistency=一致)"
+            )
+
+        return {
+            "label": "正常",
+            "reason": reason or h2_reason,
+            "img1_trailer_rear_visible": base_result["img1_trailer_rear_visible"],
+            "img2_trailer_rear_visible": base_result["img2_trailer_rear_visible"],
+            "pair_comparable": base_result["pair_comparable"],
+            "plate_or_number_consistency": "一致",
+            "structure_consistency": "未检验",
         }
 
     def _fallback_label_from_text(self, text: str) -> str:

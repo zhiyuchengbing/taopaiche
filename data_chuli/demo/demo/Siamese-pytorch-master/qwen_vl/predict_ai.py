@@ -1,7 +1,57 @@
 import json
+from typing import Any, Dict, Optional
 
 import ollama
 from pathlib import Path
+
+
+def _crop_flag_text(ok: Optional[bool]) -> str:
+    return "成功" if ok else "失败"
+
+
+def _build_head_crop_context(crop_status: Optional[Dict[str, Any]]) -> str:
+    if not crop_status:
+        return ""
+
+    return (
+        "【裁切状态（由系统提供，必须采信）】\n"
+        f"- 图1整车裁切：{_crop_flag_text(crop_status.get('vehicle1_ok'))}\n"
+        f"- 图2整车裁切：{_crop_flag_text(crop_status.get('vehicle2_ok'))}\n"
+        f"- 图1车头裁切：{_crop_flag_text(crop_status.get('head1_ok'))}\n"
+        f"- 图2车头裁切：{_crop_flag_text(crop_status.get('head2_ok'))}\n\n"
+        "【不对称裁切规则（最高优先，高于一票否决）】\n"
+        "C1. 若仅一侧车头裁切失败：优先观察裁切失败侧画面中，过磅车道中央是否存在清晰卡车车头。\n"
+        "C2. 若失败侧根本无车（空车道、仅行人/地磅设备/背景建筑）：直接判 fake_plate，reason 必须写「裁切失败侧无目标车辆」。\n"
+        "C3. 若失败侧仍有车（只是裁切失败导致为全景）：进入「全景 vs 特写」规则，不得仅凭尺度差异判套牌。\n\n"
+        "【全景 vs 特写规则】\n"
+        "P1. 禁止比对格栅条纹数、小字、局部反光等微小结构。\n"
+        "P2. 只比整体外观：驾驶室轮廓、导流罩形态、大灯布局、保险杠大体形状、品牌区域有无。\n"
+        "P3. 若因一张全景一张特写导致上述整体特征仍无法可靠对比："
+        "reason 必须写「输入图片质量太差，AI无法判断」，label 必须设为 unknown，"
+        "禁止强行 fake_plate 或 normal。\n\n"
+    )
+
+
+def _build_main_tail_crop_context(crop_status: Optional[Dict[str, Any]]) -> str:
+    if not crop_status:
+        return ""
+
+    return (
+        "【裁切状态（由系统提供，必须采信）】\n"
+        f"- 图1整车裁切：{_crop_flag_text(crop_status.get('vehicle1_ok'))}\n"
+        f"- 图2整车裁切：{_crop_flag_text(crop_status.get('vehicle2_ok'))}\n"
+        f"- 图1主视角车尾裁切：{_crop_flag_text(crop_status.get('main_tail1_ok'))}\n"
+        f"- 图2主视角车尾裁切：{_crop_flag_text(crop_status.get('main_tail2_ok'))}\n\n"
+        "【不对称裁切规则（最高优先）】\n"
+        "C1. 若仅一侧主视角车尾裁切失败：优先观察失败侧画面中，是否可见牵引车+挂车侧后段/栏板/轮轴。\n"
+        "C2. 若失败侧根本无挂车侧后段（空车道、仅行人/设备）：reason 写「输入图片质量太差，AI无法判断」，label 设为 unknown。\n"
+        "C3. 若失败侧仍有挂车侧后段（只是裁切失败导致为全景）：进入「全景 vs 特写」规则。\n\n"
+        "【全景 vs 特写规则】\n"
+        "P1. 禁止比对栏板纹理、小安装件等微小结构。\n"
+        "P2. 只比整体：栏高大类、轴数布局、侧挡板有无、侧挂附件大体形态。\n"
+        "P3. 若整体仍无法可靠对比：reason 写「输入图片质量太差，AI无法判断」，label 设为 unknown，"
+        "禁止强行 change_trailer 或 normal。\n\n"
+    )
 
 
 class VehicleCheck:
@@ -17,14 +67,20 @@ class VehicleCheck:
         self.last_error = ""
         self.last_raw_output = ""
 
-    def _build_head_prompt(self, low_similarity_fallback_label: str = "normal"):
+    def _build_head_prompt(
+        self,
+        low_similarity_fallback_label: str = "normal",
+        crop_status: Optional[Dict[str, Any]] = None,
+    ):
         fallback_conclusion_text = (
             "车头相似度低于阈值，判定为套牌"
             if low_similarity_fallback_label == "fake_plate"
             else "车头相似度大于阈值，判定为正常"
         )
+        crop_context = _build_head_crop_context(crop_status)
         return (
             "你现在只比较两张车头裁切图，只判断：fake_plate 或 normal。\n\n"
+            f"{crop_context}"
             "一票否决（最高优先级，违反任一条则不得仅凭文字判 fake_plate）：\n"
             "V1. 一侧有字、一侧无字，或一侧发白/字符看不清 → 不得单独判套牌；须先判断是否为过曝、反光、阴影、背光或时段光照所致。\n"
             "V2. 任一侧导流罩、引擎盖、车门、遮阳板文字区存在强反光、过曝、发白、深阴影或亮斑盖住字符 → 该子区域文字证据作废，reason 须写明成像不可靠。\n"
@@ -66,22 +122,35 @@ class VehicleCheck:
             "输出要求：\n"
             "请按以下 JSON 格式输出，且只能输出一个 JSON 对象，不要输出额外解释：\n"
             "{\n"
-            '  "label": "fake_plate 或 normal",\n'
+            '  "label": "fake_plate 或 normal 或 unknown",\n'
             f'  "reason": "优先按模板：子区域=…；图1可读性=清晰|过曝|阴影|反光；图2可读性=…；硬结构=一致|不一致；文字证据=采纳|作废(原因)。'
-            f"一句到两句中文；图片质量太差时写输入图片质量太差、AI无法判断、{fallback_conclusion_text}，label 设为 {low_similarity_fallback_label}；"
+            "一句到两句中文；触发 C2 无目标车辆时 label=fake_plate；触发 P3 全景vs特写不可比时写输入图片质量太差、AI无法判断，label=unknown；"
+            f"其他图片质量太差（非裁切问题）时可写输入图片质量太差、AI无法判断、{fallback_conclusion_text}，label 设为 {low_similarity_fallback_label}；"
             "同部位对齐=否或任一侧不可读或触发 V1–V2 时 label 必须为 normal；"
             "禁止在 reason 写稳定标识差异的同时未说明两侧可读性；"
             'reason 只用中文，禁止出现 fake_plate、normal 等英文 label 词，可写套牌、正常、不能据此判套牌、不作为套牌依据"\n'
             "}\n"
         )
 
-    def _build_tail_prompt(self):
+    def _build_tail_prompt(
+        self,
+        low_similarity_fallback_label: str = "normal",
+        crop_status: Optional[Dict[str, Any]] = None,
+    ):
         """主视角/车头方向下的车尾裁切图（tail1/tail2），非正后方尾部视角。"""
+        fallback_conclusion_text = (
+            "车尾相似度低于或等于阈值，判定为换挂"
+            if low_similarity_fallback_label == "change_trailer"
+            else "车尾相似度高于阈值，判定为正常"
+        )
+        crop_context = _build_main_tail_crop_context(crop_status)
         return (
+            f"{crop_context}"
             "软限制：\n"
-            "0. 先做资格审查；主体过小、过糊、强反光、过曝、深阴影遮挡、只能猜测时，尽快判 normal。\n"
+            "0. 先做资格审查；主体过小、过糊、强反光、过曝、深阴影遮挡、只能猜测时，"
+            f"写「输入图片质量太差，AI无法判断、{fallback_conclusion_text}」，label 设为 {low_similarity_fallback_label}，勿展开长篇分析。\n"
             "0.1 不要为了 change_trailer 放宽标准；理由最多1到2句。\n"
-            "0.2 你只判断 change_trailer 或 normal。\n\n"
+            "0.2 你只判断 change_trailer 或 normal；全景vs特写不可比（P3）时 label 设为 unknown。\n\n"
             "视角（最高优先级）：\n"
             "输入是主视角/车头方向下的车尾裁切图，常见为挂车侧后段、侧挡板、轮轴、挡泥板、底盘侧挂附件。\n"
             "禁止因本视角看不到的部位猜测换挂；不得把货物、篷布、堆料轮廓当作侧挡板或车体结构。\n\n"
@@ -98,8 +167,9 @@ class VehicleCheck:
             "输出要求：\n"
             "请按以下 JSON 格式输出，且只能输出一个 JSON 对象，不要输出额外解释：\n"
             "{\n"
-            '  "label": "change_trailer 或 normal",\n'
+            '  "label": "change_trailer 或 normal 或 unknown",\n'
             '  "reason": "一句到两句中文，点明栏型/轴数/侧挂附件等具体依据，禁止空泛；'
+            "触发 P3 全景vs特写不可比时写输入图片质量太差、AI无法判断，label=unknown；"
             "证据不足、栏板色相不可信或差异可归因光照/阴影/货物/篷布/成像时 label 必须为 normal；"
             'reason 只用中文，禁止出现 change_trailer、normal 等英文 label 词，可写换挂、正常、不能据此判换挂；'
             "栏板色相不可信时 reason 须写几何/安装件一致或证据不足，禁止仅以颜色/材质定换挂\"\n"
@@ -516,17 +586,24 @@ class VehicleCheck:
         self,
         head1_path: str,
         head2_path: str,
-        low_similarity_fallback_label: str = "normal"
+        low_similarity_fallback_label: str = "normal",
+        crop_status: Optional[Dict[str, Any]] = None,
     ) -> dict:
         return self._call_head_model_with_reason(
-            self._build_head_prompt(low_similarity_fallback_label),
+            self._build_head_prompt(low_similarity_fallback_label, crop_status=crop_status),
             head1_path,
             head2_path,
         )
 
-    def check_tail_with_reason(self, tail1_path: str, tail2_path: str) -> dict:
+    def check_tail_with_reason(
+        self,
+        tail1_path: str,
+        tail2_path: str,
+        low_similarity_fallback_label: str = "normal",
+        crop_status: Optional[Dict[str, Any]] = None,
+    ) -> dict:
         return self._call_tail_model_with_reason(
-            self._build_tail_prompt(),
+            self._build_tail_prompt(low_similarity_fallback_label, crop_status=crop_status),
             tail1_path,
             tail2_path,
         )

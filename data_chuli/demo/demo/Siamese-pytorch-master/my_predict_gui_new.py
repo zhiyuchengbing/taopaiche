@@ -1755,6 +1755,9 @@ def _record_metric(
         tail34_ai_display_text: Optional[str] = None,
         main_tail_ai_display_text: Optional[str] = None,
         final_diff_summary: Optional[str] = None,
+        crop_status: Optional[Dict[str, Any]] = None,
+        head_ai_decision_source: Optional[str] = None,
+        main_tail_ai_decision_source: Optional[str] = None,
 ) -> Optional[str]:
     """
     记录指标并保存图片
@@ -1812,6 +1815,9 @@ def _record_metric(
             "tail34_ai_display_text": tail34_ai_display_text,
             "main_tail_ai_display_text": main_tail_ai_display_text,
             "final_diff_summary": final_diff_summary,
+            "crop_status": crop_status,
+            "head_ai_decision_source": head_ai_decision_source,
+            "main_tail_ai_decision_source": main_tail_ai_decision_source,
             "endpoint": endpoint,
             "source": source,
             "lat_ms": lat_ms,
@@ -1871,6 +1877,9 @@ def _record_metric(
         "tail34_ai_display_text": tail34_ai_display_text,
         "main_tail_ai_display_text": main_tail_ai_display_text,
         "final_diff_summary": final_diff_summary,
+        "crop_status": crop_status,
+        "head_ai_decision_source": head_ai_decision_source,
+        "main_tail_ai_decision_source": main_tail_ai_decision_source,
     }
 
     if record_id:
@@ -2107,6 +2116,9 @@ def _build_classification_result() -> Dict[str, Any]:
         "tail34_ai_display_text": None,
         "main_tail_ai_display_text": None,
         "final_diff_summary": None,
+        "crop_status": None,
+        "head_ai_decision_source": None,
+        "main_tail_ai_decision_source": None,
     }
 
 
@@ -2435,6 +2447,135 @@ def _prepare_tail_view_assets(
     return (ai_paths[0], ai_paths[1]), merged, temp_files, None
 
 
+_AI_QUALITY_TOO_POOR_MARKERS = ("图片质量太差", "ai无法判断", "AI无法判断")
+_HEAD_CROP_NO_VEHICLE_MARKERS = (
+    "裁切失败侧无目标车辆",
+    "无目标车辆",
+    "未见车辆",
+    "无车",
+    "空车道",
+    "未拍到车辆",
+    "不存在车辆",
+)
+
+
+def _pil_crop_succeeded(parent: Optional[Image.Image], child: Optional[Image.Image]) -> bool:
+    if parent is None or child is None:
+        return False
+    if parent.size != child.size:
+        return True
+    parent_arr = np.array(parent.convert("RGB"))
+    child_arr = np.array(child.convert("RGB"))
+    return not np.array_equal(parent_arr, child_arr)
+
+
+def _build_crop_status(
+        img1: Image.Image,
+        img2: Image.Image,
+        v1: Image.Image,
+        v2: Image.Image,
+        h1: Image.Image,
+        h2: Image.Image,
+        t1: Image.Image,
+        t2: Image.Image,
+) -> Dict[str, Any]:
+    vehicle1_ok = _pil_crop_succeeded(img1, v1)
+    vehicle2_ok = _pil_crop_succeeded(img2, v2)
+    head1_ok = _pil_crop_succeeded(v1, h1)
+    head2_ok = _pil_crop_succeeded(v2, h2)
+    main_tail1_ok = _pil_crop_succeeded(v1, t1)
+    main_tail2_ok = _pil_crop_succeeded(v2, t2)
+    return {
+        "vehicle1_ok": vehicle1_ok,
+        "vehicle2_ok": vehicle2_ok,
+        "head1_ok": head1_ok,
+        "head2_ok": head2_ok,
+        "main_tail1_ok": main_tail1_ok,
+        "main_tail2_ok": main_tail2_ok,
+        "head_ai_pair_ok": head1_ok and head2_ok,
+        "head_ai_asymmetric": head1_ok != head2_ok,
+        "main_tail_ai_pair_ok": main_tail1_ok and main_tail2_ok,
+        "main_tail_ai_asymmetric": main_tail1_ok != main_tail2_ok,
+    }
+
+
+def _reason_indicates_ai_quality_fallback(reason: Optional[str]) -> bool:
+    text = str(reason or "")
+    return any(marker in text for marker in _AI_QUALITY_TOO_POOR_MARKERS)
+
+
+def _reason_indicates_head_crop_no_vehicle(reason: Optional[str]) -> bool:
+    text = str(reason or "")
+    return any(marker in text for marker in _HEAD_CROP_NO_VEHICLE_MARKERS)
+
+
+def _head_similarity_fallback_label(head_prob: Optional[float], head_threshold: float) -> str:
+    if head_prob is not None and head_prob > head_threshold:
+        return "normal"
+    return "fake_plate"
+
+
+def _head_similarity_fallback_reason(head_prob: Optional[float], head_threshold: float, ai_label: str) -> str:
+    prob_text = f"{head_prob:.4f}" if head_prob is not None else "未知"
+    if ai_label == "normal":
+        return (
+            f"输入图片质量太差，AI无法判断，车头相似度{prob_text}高于阈值{head_threshold}，判定正常"
+        )
+    return (
+        f"输入图片质量太差，AI无法判断，车头相似度{prob_text}低于或等于阈值{head_threshold}，判定套牌"
+    )
+
+
+def _resolve_head_ai_with_crop_guard(
+        ai_payload: Dict[str, Any],
+        head_prob: Optional[float],
+        head_threshold: float,
+) -> Tuple[str, str, str]:
+    ai_head = str(ai_payload.get("label") or "").strip().lower()
+    ai_head_reason = str(ai_payload.get("reason") or "").strip()
+
+    if _reason_indicates_head_crop_no_vehicle(ai_head_reason):
+        reason = ai_head_reason or "裁切失败侧无目标车辆，判定套牌"
+        return "fake_plate", reason, "crop_no_vehicle"
+
+    if ai_head in ("fake_plate", "normal"):
+        return ai_head, ai_head_reason or "", "ai"
+
+    if ai_head == "unknown" or _reason_indicates_ai_quality_fallback(ai_head_reason):
+        fallback_label = _head_similarity_fallback_label(head_prob, head_threshold)
+        fallback_reason = _head_similarity_fallback_reason(head_prob, head_threshold, fallback_label)
+        return fallback_label, fallback_reason, "similarity_fallback"
+
+    return "", "", "invalid"
+
+
+def _resolve_main_tail_ai_with_crop_guard(
+        ai_payload: Dict[str, Any],
+        tail_prob: Optional[float],
+        tail_threshold: float,
+) -> Tuple[str, str, str]:
+    ai_tail = str(ai_payload.get("label") or "").strip().lower()
+    ai_tail_reason = str(ai_payload.get("reason") or "").strip()
+
+    if ai_tail in ("change_trailer", "normal"):
+        return ai_tail, ai_tail_reason or "", "ai"
+
+    if ai_tail == "unknown" or _reason_indicates_ai_quality_fallback(ai_tail_reason):
+        fallback_label = _main_tail_similarity_fallback_label(tail_prob, tail_threshold)
+        prob_text = f"{tail_prob:.4f}" if tail_prob is not None else "未知"
+        if fallback_label == "normal":
+            fallback_reason = (
+                f"输入图片质量太差，AI无法判断，车尾相似度{prob_text}高于阈值{tail_threshold}，判定正常"
+            )
+        else:
+            fallback_reason = (
+                f"输入图片质量太差，AI无法判断，车尾相似度{prob_text}低于或等于阈值{tail_threshold}，判定换挂"
+            )
+        return fallback_label, fallback_reason, "similarity_fallback"
+
+    return "", "", "invalid"
+
+
 def _crop_part_from_vehicle_pil(vehicle_image: Image.Image, cls_id: int) -> Image.Image:
     try:
         if vehicle_image is None:
@@ -2517,19 +2658,19 @@ def _compute_probs_and_previews_pil(
         img1: Image.Image, img2: Image.Image
 ) -> Tuple[
     Optional[float], Optional[float], Optional[Dict[str, str]], Optional[Dict[str, str]],
-    Optional[Dict[str, Image.Image]], Optional[str]
+    Optional[Dict[str, Image.Image]], Optional[Dict[str, Any]], Optional[str]
 ]:
     """
     计算概率并生成预览图和原始图
 
     Returns:
-        (head_prob, tail_prob, previews, original_images, cropped_pils, error)
+        (head_prob, tail_prob, previews, original_images, cropped_pils, crop_status, error)
         cropped_pils: {"h1": ..., "h2": ..., "t1": ..., "t2": ...} 裁切后的PIL图片，用于AI二次判断
     """
     try:
         _init_models()
         if _CROPPER is None or _HEAD_MODEL is None or _TAIL_MODEL is None:
-            return None, None, None, None, None, "models not initialized"
+            return None, None, None, None, None, None, "models not initialized"
 
         # 保存原始图片的data URL
         original_images: Dict[str, str] = {
@@ -2566,10 +2707,13 @@ def _compute_probs_and_previews_pil(
         cropped_pils: Dict[str, Image.Image] = {
             "h1": h1, "h2": h2, "t1": t1, "t2": t2,
         }
+        crop_status = _build_crop_status(img1, img2, v1, v2, h1, h2, t1, t2)
+        if crop_status.get("head_ai_asymmetric") or crop_status.get("main_tail_ai_asymmetric"):
+            print(f"[predict] crop_status: {crop_status}")
 
-        return float(head_prob), float(tail_prob), previews, original_images, cropped_pils, None
+        return float(head_prob), float(tail_prob), previews, original_images, cropped_pils, crop_status, None
     except Exception as e:
-        return None, None, None, None, None, str(e)
+        return None, None, None, None, None, None, str(e)
 
 
 def _compute_head_tail_probs_pil(img1: Image.Image, img2: Image.Image) -> Tuple[
@@ -2614,6 +2758,72 @@ def _classify_case(head_prob: Optional[float], tail_prob: Optional[float]) -> st
     return "normal"
 
 
+def _main_tail_similarity_fallback_label(tail_prob: Optional[float], tail_threshold: float) -> str:
+    if tail_prob is not None and tail_prob > tail_threshold:
+        return "normal"
+    return "change_trailer"
+
+
+def _apply_main_tail_similarity_fallback(
+        tail_prob: Optional[float],
+        tail_threshold: float,
+) -> Tuple[str, str, str]:
+    """头部视角车尾 AI 无有效结论时，按车尾相似度与阈值比较定案。"""
+    ai_label = _main_tail_similarity_fallback_label(tail_prob, tail_threshold)
+    if ai_label == "normal":
+        prob_text = f"{tail_prob:.4f}" if tail_prob is not None else "未知"
+        reason = (
+            f"头部视角车尾AI无有效结论，车尾相似度{prob_text}高于阈值{tail_threshold}，判定正常"
+        )
+        return "same", ai_label, reason
+
+    prob_text = f"{tail_prob:.4f}" if tail_prob is not None else "未知"
+    reason = (
+        f"头部视角车尾AI无有效结论，车尾相似度{prob_text}低于或等于阈值{tail_threshold}，判定换挂"
+    )
+    return "different", ai_label, reason
+
+
+def _head_ai_cleared_normal(head_need_ai: bool, head_verdict: Optional[str], head_ai_used: bool) -> bool:
+    return head_verdict == "normal" and (not head_need_ai or head_ai_used)
+
+
+def _apply_tail34_h2_guard(ai_tail_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """GUI 二次校验：尾部视角车尾 AI 在号牌一致时不得输出换挂或无法判断。"""
+    payload = dict(ai_tail_payload or {})
+    label = str(payload.get("label") or "").strip()
+    plate = str(payload.get("plate_or_number_consistency") or "").strip()
+    pair_comparable = str(payload.get("pair_comparable") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+
+    if pair_comparable == "否":
+        return payload
+
+    plate_matched = plate == "一致"
+    reason_indicates_plate_match = any(
+        token in reason
+        for token in ("号牌一致", "号牌相同", "车牌一致", "车牌相同", "编号一致")
+    )
+    should_force_normal = plate_matched or (label == "换挂" and reason_indicates_plate_match)
+    if not should_force_normal:
+        return payload
+
+    guard_reason = "双侧挂车号牌/放大号关键位一致，GUI二次校验：结构比对结论无效，强制判定正常"
+    original_label = label
+    payload["label"] = "正常"
+    payload["plate_or_number_consistency"] = "一致"
+    payload["structure_consistency"] = "未检验"
+    if reason:
+        payload["reason"] = f"{guard_reason}（原判定：{reason}）"
+    else:
+        payload["reason"] = guard_reason
+    if original_label != "正常":
+        print(
+            f"[predict] tail34 H2 GUI guard adjusted label: {original_label!r} -> '正常'"
+        )
+    return payload
+
+
 def _classify_with_ai_second_judge(
         head_prob: Optional[float],
         tail_prob: Optional[float],
@@ -2621,6 +2831,7 @@ def _classify_with_ai_second_judge(
         tail_original_paths: Optional[Tuple[str, str]] = None,
         force_head_ai_recheck: bool = False,
         ocr_match: Optional[bool] = None,
+        crop_status: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     两层鉴别分类：
@@ -2660,6 +2871,7 @@ def _classify_with_ai_second_judge(
         }
     """
     result: Dict[str, Any] = _build_classification_result()
+    result["crop_status"] = crop_status
 
     if head_prob is None or tail_prob is None:
         return _populate_ai_trace_texts(result, head_prob)
@@ -2731,34 +2943,32 @@ def _classify_with_ai_second_judge(
                 ai_head_payload = _AI_CHECKER.check_head_with_reason(
                     h1_path,
                     h2_path,
-                    low_similarity_fallback_label=low_similarity_fallback_label
+                    low_similarity_fallback_label=low_similarity_fallback_label,
+                    crop_status=crop_status,
                 )
-                ai_head = str(ai_head_payload.get("label") or "")
-                ai_head_reason = str(ai_head_payload.get("reason") or "").strip()
-                if ai_head in ("fake_plate", "normal"):
-                    result["ai_head_result"] = ai_head
+                head_label, ai_head_reason, head_decision_source = _resolve_head_ai_with_crop_guard(
+                    ai_head_payload,
+                    head_prob,
+                    head_direct_normal_th,
+                )
+                if head_decision_source == "invalid":
+                    result["ai_head_result"] = str(ai_head_payload.get("label") or "")
                     result["ai_head_reason"] = ai_head_reason or None
-                    head_verdict = ai_head
-                elif ai_head == "unknown":
-                    if head_prob is not None and head_prob <= head_direct_normal_th:
-                        head_verdict = "fake_plate"
-                        fallback_reason = "输入图片质量太差，AI无法判断，车头相似度低于或等于阈值，判断为套牌"
-                    else:
-                        head_verdict = "normal"
-                        fallback_reason = "输入图片质量太差，AI无法判断，车头相似度大于阈值，判断为正常"
-                    result["ai_head_result"] = head_verdict
-                    result["ai_head_reason"] = fallback_reason
-                    ai_head_reason = fallback_reason
                     print(
-                        f"[predict] head AI result undetermined, "
-                        f"fallback to stage1 by head similarity {head_prob:.4f} -> {head_verdict}"
+                        f"[predict] head AI returned invalid result: "
+                        f"{ai_head_payload.get('label')!r}, fallback to stage1"
                     )
-                else:
-                    result["ai_head_result"] = ai_head
-                    result["ai_head_reason"] = ai_head_reason or None
-                    print(f"[predict] head AI returned invalid result: {ai_head!r}, fallback to stage1")
                     head_ai_invalid = True
                     head_verdict = None
+                else:
+                    result["ai_head_result"] = head_label
+                    result["ai_head_reason"] = ai_head_reason or None
+                    result["head_ai_decision_source"] = head_decision_source
+                    head_verdict = head_label
+                    print(
+                        f"[predict] head AI resolved via {head_decision_source}: "
+                        f"{head_label} ({ai_head_reason})"
+                    )
             else:
                 print("[predict] failed to save head crops, fallback to stage1 result")
                 head_ai_invalid = True
@@ -2779,9 +2989,11 @@ def _classify_with_ai_second_judge(
             result["tail_second_check_used"] = True
             result["tail_ai_mode"] = "tail34_cropped_primary"
             try:
-                ai_tail_payload = _AI_TAIL_CHECKER.check_tail_on_original(
-                    tail_original_paths[0],
-                    tail_original_paths[1],
+                ai_tail_payload = _apply_tail34_h2_guard(
+                    _AI_TAIL_CHECKER.check_tail_on_original(
+                        tail_original_paths[0],
+                        tail_original_paths[1],
+                    )
                 )
                 tail_second_label = str(ai_tail_payload.get("label") or "").strip()
                 tail_second_reason = str(ai_tail_payload.get("reason") or "").strip()
@@ -2824,17 +3036,59 @@ def _classify_with_ai_second_judge(
                     f"[predict] 3/4 cropped tail-view AI could not decide, "
                     f"tail similarity {tail_prob:.4f} still requires main tail AI fallback"
                 )
-                ai_tail_payload = _AI_CHECKER.check_tail_with_reason(t1_path, t2_path)
-                ai_tail = str(ai_tail_payload.get("label") or "")
-                ai_tail_reason = str(ai_tail_payload.get("reason") or "").strip()
-                result["ai_tail_result"] = ai_tail
+                main_tail_fallback_label = _main_tail_similarity_fallback_label(
+                    tail_prob, tail_direct_normal_th
+                )
+                ai_tail_payload = _AI_CHECKER.check_tail_with_reason(
+                    t1_path,
+                    t2_path,
+                    low_similarity_fallback_label=main_tail_fallback_label,
+                    crop_status=crop_status,
+                )
+                main_tail_label, ai_tail_reason, main_tail_decision_source = _resolve_main_tail_ai_with_crop_guard(
+                    ai_tail_payload,
+                    tail_prob,
+                    tail_direct_normal_th,
+                )
+                result["ai_tail_result"] = main_tail_label or str(ai_tail_payload.get("label") or "")
                 result["ai_tail_reason"] = ai_tail_reason or None
                 result["tail_ai_mode"] = "tail34_cropped_then_main" if use_tail_original_ai else "main_tail_crop_only"
-                if ai_tail in ("change_trailer", "normal"):
-                    tail_verdict = "different" if ai_tail == "change_trailer" else "same"
+                if main_tail_decision_source == "invalid":
+                    if _head_ai_cleared_normal(
+                        head_need_ai, head_verdict, bool(result.get("head_ai_used"))
+                    ):
+                        tail_verdict, ai_tail_label, ai_tail_reason = _apply_main_tail_similarity_fallback(
+                            tail_prob, tail_direct_normal_th
+                        )
+                        result["ai_tail_result"] = ai_tail_label
+                        result["ai_tail_reason"] = ai_tail_reason
+                        result["main_tail_ai_decision_source"] = "similarity_fallback"
+                        print(
+                            f"[predict] main tail AI returned invalid result: "
+                            f"{ai_tail_payload.get('label')!r}, similarity fallback -> {ai_tail_label}"
+                        )
+                    else:
+                        print(
+                            f"[predict] main tail AI returned invalid result: "
+                            f"{ai_tail_payload.get('label')!r}, fallback to stage1"
+                        )
+                        tail_verdict = None
                 else:
-                    print(f"[predict] main tail AI returned invalid result: {ai_tail!r}, fallback to stage1")
-                    tail_verdict = None
+                    result["main_tail_ai_decision_source"] = main_tail_decision_source
+                    tail_verdict = "different" if main_tail_label == "change_trailer" else "same"
+                    print(
+                        f"[predict] main tail AI resolved via {main_tail_decision_source}: "
+                        f"{main_tail_label} ({ai_tail_reason})"
+                    )
+            elif _head_ai_cleared_normal(
+                head_need_ai, head_verdict, bool(result.get("head_ai_used"))
+            ):
+                print("[predict] failed to save main tail crops, fallback to tail similarity")
+                tail_verdict, ai_tail_label, ai_tail_reason = _apply_main_tail_similarity_fallback(
+                    tail_prob, tail_direct_normal_th
+                )
+                result["ai_tail_result"] = ai_tail_label
+                result["ai_tail_reason"] = ai_tail_reason
             else:
                 print("[predict] failed to save main tail crops, fallback to stage1 result")
                 tail_verdict = None
@@ -2850,6 +3104,19 @@ def _classify_with_ai_second_judge(
     result["ai_judge_used"] = True
     result["ai_ms"] = (time.perf_counter() - t_ai_start) * 1000.0
 
+    if (
+        tail_need_ai
+        and tail_verdict is None
+        and _head_ai_cleared_normal(head_need_ai, head_verdict, bool(result.get("head_ai_used")))
+    ):
+        tail_verdict, ai_tail_label, ai_tail_reason = _apply_main_tail_similarity_fallback(
+            tail_prob, tail_direct_normal_th
+        )
+        result["main_tail_ai_used"] = True
+        result["ai_tail_result"] = ai_tail_label
+        result["ai_tail_reason"] = ai_tail_reason
+        print(f"[predict] tail AI inconclusive after head AI normal, similarity fallback -> {ai_tail_label}")
+
     ai_invalid = (head_need_ai and head_verdict is None) or (tail_need_ai and tail_verdict is None)
 
     # ---- 综合判定 ----
@@ -2857,6 +3124,7 @@ def _classify_with_ai_second_judge(
         result["case_type"] = stage1_case_type
         result["diff_desc"] = ai_fallback_reason
         result["diff_analyzed_part"] = None
+        return _populate_ai_trace_texts(result, head_prob)
     elif head_verdict == "fake_plate":
         result["case_type"] = "fake_plate"
     elif tail_verdict == "different":
@@ -2914,6 +3182,7 @@ def _classify_with_head_ocr_precheck(
         tail_prob: Optional[float],
         cropped_pils: Optional[Dict[str, Image.Image]] = None,
         tail_original_paths: Optional[Tuple[str, str]] = None,
+        crop_status: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     result = _build_classification_result()
     result["stage1_case_type"] = _classify_case(head_prob, tail_prob)
@@ -2928,6 +3197,7 @@ def _classify_with_head_ocr_precheck(
         tail_original_paths=tail_original_paths,
         force_head_ai_recheck=bool(ocr_result.get("ocr_match") is False and head_prob is not None and head_prob > _HEAD_THRESHOLD),
         ocr_match=ocr_result.get("ocr_match"),
+        crop_status=crop_status,
     )
     downstream.update(ocr_result)
     if ocr_result.get("ocr_match") is False:
@@ -2951,6 +3221,12 @@ def _append_ai_trace_fields(resp: Dict[str, Any], ai_result: Dict[str, Any]) -> 
         resp["main_tail_ai_display_text"] = ai_result.get("main_tail_ai_display_text")
     if ai_result.get("final_diff_summary") is not None:
         resp["final_diff_summary"] = ai_result.get("final_diff_summary")
+    if ai_result.get("crop_status") is not None:
+        resp["crop_status"] = ai_result.get("crop_status")
+    if ai_result.get("head_ai_decision_source") is not None:
+        resp["head_ai_decision_source"] = ai_result.get("head_ai_decision_source")
+    if ai_result.get("main_tail_ai_decision_source") is not None:
+        resp["main_tail_ai_decision_source"] = ai_result.get("main_tail_ai_decision_source")
     return resp
 
 
@@ -3141,7 +3417,7 @@ def predict() -> Any:
 
             # 生成预览图和原始图（用于保存）
             t_preview0 = time.perf_counter()
-            head_prob, tail_prob, previews, original_images, cropped_pils, err = _compute_probs_and_previews_pil(img1, img2)
+            head_prob, tail_prob, previews, original_images, cropped_pils, crop_status, err = _compute_probs_and_previews_pil(img1, img2)
             t_preview_ms = (time.perf_counter() - t_preview0) * 1000.0
 
             # 计算耗时
@@ -3191,6 +3467,7 @@ def predict() -> Any:
             tail_prob,
             cropped_pils,
             tail_original_paths=tail_ai_paths,
+            crop_status=crop_status,
         )
         case_type = ai_result["case_type"]
 
@@ -3281,6 +3558,9 @@ def predict() -> Any:
         tail34_ai_display_text=ai_result.get("tail34_ai_display_text"),
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
+        crop_status=ai_result.get("crop_status"),
+        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
+        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
     )
 
     if record_id:
@@ -3433,7 +3713,7 @@ def predict_preview() -> Any:
             return jsonify({"ok": False, "error": f"failed to open images: {e}"}), 400
 
         t_compute0 = time.perf_counter()
-        head_prob, tail_prob, previews, original_images, cropped_pils, err = _compute_probs_and_previews_pil(img1, img2)
+        head_prob, tail_prob, previews, original_images, cropped_pils, crop_status, err = _compute_probs_and_previews_pil(img1, img2)
         t_compute_ms = (time.perf_counter() - t_compute0) * 1000.0
 
         tail_view_temp_paths: List[str] = []
@@ -3460,6 +3740,7 @@ def predict_preview() -> Any:
             tail_prob,
             cropped_pils,
             tail_original_paths=tail_ai_paths,
+            crop_status=crop_status,
         )
         case_type = ai_result["case_type"]
 
@@ -3551,6 +3832,9 @@ def predict_preview() -> Any:
         tail34_ai_display_text=ai_result.get("tail34_ai_display_text"),
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
+        crop_status=ai_result.get("crop_status"),
+        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
+        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
     )
 
     if record_id:
@@ -3666,7 +3950,7 @@ def predict_upload_preview() -> Any:
             return jsonify({"ok": False, "error": f"failed to open images: {e}"}), 400
 
         t_compute0 = time.perf_counter()
-        head_prob, tail_prob, previews, original_images, cropped_pils, err = _compute_probs_and_previews_pil(img1, img2)
+        head_prob, tail_prob, previews, original_images, cropped_pils, crop_status, err = _compute_probs_and_previews_pil(img1, img2)
         t_compute_ms = (time.perf_counter() - t_compute0) * 1000.0
 
         # 两层鉴别分类（含AI二次判断）
@@ -3699,6 +3983,7 @@ def predict_upload_preview() -> Any:
             tail_prob,
             cropped_pils,
             tail_original_paths=tail_original_paths,
+            crop_status=crop_status,
         )
         case_type = ai_result["case_type"]
 
@@ -3796,6 +4081,9 @@ def predict_upload_preview() -> Any:
         tail34_ai_display_text=ai_result.get("tail34_ai_display_text"),
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
+        crop_status=ai_result.get("crop_status"),
+        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
+        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
     )
 
     if record_id:
@@ -3894,7 +4182,7 @@ def predict_upload() -> Any:
 
             # 生成预览图和原始图（用于保存）
             t_preview0 = time.perf_counter()
-            head_prob, tail_prob, previews, original_images, cropped_pils, err = _compute_probs_and_previews_pil(img1, img2)
+            head_prob, tail_prob, previews, original_images, cropped_pils, crop_status, err = _compute_probs_and_previews_pil(img1, img2)
             t_preview_ms = (time.perf_counter() - t_preview0) * 1000.0
         except Exception as e:
             lat_ms = (time.perf_counter() - t0) * 1000.0
@@ -3949,6 +4237,7 @@ def predict_upload() -> Any:
             tail_prob,
             cropped_pils,
             tail_original_paths=tail_original_paths,
+            crop_status=crop_status,
         )
         case_type = ai_result["case_type"]
 
@@ -4044,6 +4333,9 @@ def predict_upload() -> Any:
         tail34_ai_display_text=ai_result.get("tail34_ai_display_text"),
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
+        crop_status=ai_result.get("crop_status"),
+        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
+        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
     )
 
     if record_id:

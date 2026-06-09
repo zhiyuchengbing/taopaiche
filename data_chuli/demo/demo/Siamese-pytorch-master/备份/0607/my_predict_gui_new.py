@@ -2614,6 +2614,72 @@ def _classify_case(head_prob: Optional[float], tail_prob: Optional[float]) -> st
     return "normal"
 
 
+def _main_tail_similarity_fallback_label(tail_prob: Optional[float], tail_threshold: float) -> str:
+    if tail_prob is not None and tail_prob > tail_threshold:
+        return "normal"
+    return "change_trailer"
+
+
+def _apply_main_tail_similarity_fallback(
+        tail_prob: Optional[float],
+        tail_threshold: float,
+) -> Tuple[str, str, str]:
+    """头部视角车尾 AI 无有效结论时，按车尾相似度与阈值比较定案。"""
+    ai_label = _main_tail_similarity_fallback_label(tail_prob, tail_threshold)
+    if ai_label == "normal":
+        prob_text = f"{tail_prob:.4f}" if tail_prob is not None else "未知"
+        reason = (
+            f"头部视角车尾AI无有效结论，车尾相似度{prob_text}高于阈值{tail_threshold}，判定正常"
+        )
+        return "same", ai_label, reason
+
+    prob_text = f"{tail_prob:.4f}" if tail_prob is not None else "未知"
+    reason = (
+        f"头部视角车尾AI无有效结论，车尾相似度{prob_text}低于或等于阈值{tail_threshold}，判定换挂"
+    )
+    return "different", ai_label, reason
+
+
+def _head_ai_cleared_normal(head_need_ai: bool, head_verdict: Optional[str], head_ai_used: bool) -> bool:
+    return head_verdict == "normal" and (not head_need_ai or head_ai_used)
+
+
+def _apply_tail34_h2_guard(ai_tail_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """GUI 二次校验：尾部视角车尾 AI 在号牌一致时不得输出换挂或无法判断。"""
+    payload = dict(ai_tail_payload or {})
+    label = str(payload.get("label") or "").strip()
+    plate = str(payload.get("plate_or_number_consistency") or "").strip()
+    pair_comparable = str(payload.get("pair_comparable") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+
+    if pair_comparable == "否":
+        return payload
+
+    plate_matched = plate == "一致"
+    reason_indicates_plate_match = any(
+        token in reason
+        for token in ("号牌一致", "号牌相同", "车牌一致", "车牌相同", "编号一致")
+    )
+    should_force_normal = plate_matched or (label == "换挂" and reason_indicates_plate_match)
+    if not should_force_normal:
+        return payload
+
+    guard_reason = "双侧挂车号牌/放大号关键位一致，GUI二次校验：结构比对结论无效，强制判定正常"
+    original_label = label
+    payload["label"] = "正常"
+    payload["plate_or_number_consistency"] = "一致"
+    payload["structure_consistency"] = "未检验"
+    if reason:
+        payload["reason"] = f"{guard_reason}（原判定：{reason}）"
+    else:
+        payload["reason"] = guard_reason
+    if original_label != "正常":
+        print(
+            f"[predict] tail34 H2 GUI guard adjusted label: {original_label!r} -> '正常'"
+        )
+    return payload
+
+
 def _classify_with_ai_second_judge(
         head_prob: Optional[float],
         tail_prob: Optional[float],
@@ -2779,9 +2845,11 @@ def _classify_with_ai_second_judge(
             result["tail_second_check_used"] = True
             result["tail_ai_mode"] = "tail34_cropped_primary"
             try:
-                ai_tail_payload = _AI_TAIL_CHECKER.check_tail_on_original(
-                    tail_original_paths[0],
-                    tail_original_paths[1],
+                ai_tail_payload = _apply_tail34_h2_guard(
+                    _AI_TAIL_CHECKER.check_tail_on_original(
+                        tail_original_paths[0],
+                        tail_original_paths[1],
+                    )
                 )
                 tail_second_label = str(ai_tail_payload.get("label") or "").strip()
                 tail_second_reason = str(ai_tail_payload.get("reason") or "").strip()
@@ -2824,7 +2892,14 @@ def _classify_with_ai_second_judge(
                     f"[predict] 3/4 cropped tail-view AI could not decide, "
                     f"tail similarity {tail_prob:.4f} still requires main tail AI fallback"
                 )
-                ai_tail_payload = _AI_CHECKER.check_tail_with_reason(t1_path, t2_path)
+                main_tail_fallback_label = _main_tail_similarity_fallback_label(
+                    tail_prob, tail_direct_normal_th
+                )
+                ai_tail_payload = _AI_CHECKER.check_tail_with_reason(
+                    t1_path,
+                    t2_path,
+                    low_similarity_fallback_label=main_tail_fallback_label,
+                )
                 ai_tail = str(ai_tail_payload.get("label") or "")
                 ai_tail_reason = str(ai_tail_payload.get("reason") or "").strip()
                 result["ai_tail_result"] = ai_tail
@@ -2832,9 +2907,30 @@ def _classify_with_ai_second_judge(
                 result["tail_ai_mode"] = "tail34_cropped_then_main" if use_tail_original_ai else "main_tail_crop_only"
                 if ai_tail in ("change_trailer", "normal"):
                     tail_verdict = "different" if ai_tail == "change_trailer" else "same"
+                elif _head_ai_cleared_normal(
+                    head_need_ai, head_verdict, bool(result.get("head_ai_used"))
+                ):
+                    tail_verdict, ai_tail_label, ai_tail_reason = _apply_main_tail_similarity_fallback(
+                        tail_prob, tail_direct_normal_th
+                    )
+                    result["ai_tail_result"] = ai_tail_label
+                    result["ai_tail_reason"] = ai_tail_reason
+                    print(
+                        f"[predict] main tail AI returned invalid result: {ai_tail!r}, "
+                        f"similarity fallback -> {ai_tail_label}"
+                    )
                 else:
                     print(f"[predict] main tail AI returned invalid result: {ai_tail!r}, fallback to stage1")
                     tail_verdict = None
+            elif _head_ai_cleared_normal(
+                head_need_ai, head_verdict, bool(result.get("head_ai_used"))
+            ):
+                print("[predict] failed to save main tail crops, fallback to tail similarity")
+                tail_verdict, ai_tail_label, ai_tail_reason = _apply_main_tail_similarity_fallback(
+                    tail_prob, tail_direct_normal_th
+                )
+                result["ai_tail_result"] = ai_tail_label
+                result["ai_tail_reason"] = ai_tail_reason
             else:
                 print("[predict] failed to save main tail crops, fallback to stage1 result")
                 tail_verdict = None
@@ -2850,6 +2946,19 @@ def _classify_with_ai_second_judge(
     result["ai_judge_used"] = True
     result["ai_ms"] = (time.perf_counter() - t_ai_start) * 1000.0
 
+    if (
+        tail_need_ai
+        and tail_verdict is None
+        and _head_ai_cleared_normal(head_need_ai, head_verdict, bool(result.get("head_ai_used")))
+    ):
+        tail_verdict, ai_tail_label, ai_tail_reason = _apply_main_tail_similarity_fallback(
+            tail_prob, tail_direct_normal_th
+        )
+        result["main_tail_ai_used"] = True
+        result["ai_tail_result"] = ai_tail_label
+        result["ai_tail_reason"] = ai_tail_reason
+        print(f"[predict] tail AI inconclusive after head AI normal, similarity fallback -> {ai_tail_label}")
+
     ai_invalid = (head_need_ai and head_verdict is None) or (tail_need_ai and tail_verdict is None)
 
     # ---- 综合判定 ----
@@ -2857,6 +2966,7 @@ def _classify_with_ai_second_judge(
         result["case_type"] = stage1_case_type
         result["diff_desc"] = ai_fallback_reason
         result["diff_analyzed_part"] = None
+        return _populate_ai_trace_texts(result, head_prob)
     elif head_verdict == "fake_plate":
         result["case_type"] = "fake_plate"
     elif tail_verdict == "different":

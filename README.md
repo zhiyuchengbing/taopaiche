@@ -1236,3 +1236,56 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
 - **[输出要求] reason 约束**
   - 栏板色相不可信时须写几何/安装件一致或证据不足，禁止仅以颜色/材质定换挂。
 
+## 2026-06-09
+
+### 判定链路（`my_predict_gui_new.py`）
+
+- **[裁切状态] 新增 `crop_status` 全链路透传**
+  - `_build_crop_status` 逐层检测整车/车头/主视角车尾裁切是否成功（比较 parent vs child PIL 像素是否变化）；
+  - 输出 `vehicle1/2_ok`、`head1/2_ok`、`main_tail1/2_ok`，以及 `head_ai_asymmetric`、`main_tail_ai_asymmetric` 不对称标记；
+  - 不对称时打印 `[predict] crop_status` 日志；`crop_status` 写入 API 响应与 `_record_metric` 指标记录。
+
+- **[裁切守护] 车头/主视角车尾 AI 定案分路解析**
+  - `_resolve_head_ai_with_crop_guard`：reason 含「裁切失败侧无目标车辆」→ 直接 `fake_plate`（`crop_no_vehicle`）；
+  - AI 返回 `unknown` 或 reason 含「图片质量太差/AI无法判断」→ 按车头相似度与阈值比较回退（`similarity_fallback`）；
+  - `_resolve_main_tail_ai_with_crop_guard`：主视角车尾 AI 同理，`unknown`/质量太差时按车尾相似度回退；
+  - 新增 `head_ai_decision_source`、`main_tail_ai_decision_source` 字段（`ai` / `crop_no_vehicle` / `similarity_fallback` / `invalid`），便于追溯定案来源。
+
+- **[链路优化] 车头已正常时的车尾回退策略**
+  - `_head_ai_cleared_normal`：车头 AI 已判 `normal` 后，主视角车尾 AI 无有效结论（invalid/裁切保存失败/全流程仍 inconclusive）时，不再回退 stage1，改为 `_apply_main_tail_similarity_fallback` 按车尾相似度定案；
+  - 效果：车头已排除套牌后，车尾 AI 因裁切/质量原因无法判断时，用相似度阈值给出明确结论，减少「维持原结论」的模糊输出。
+
+- **[H2 二次校验] 尾部视角 GUI 层硬拦截**
+  - `_apply_tail34_h2_guard`：3/4 尾部视角 AI 返回后，若 `plate_or_number_consistency=一致` 或 reason 含号牌一致表述但 label 为换挂，GUI 强制改为「正常」、`structure_consistency=未检验`；
+  - 与 `predict_ai_shijiao2.py` 解析层 `_apply_h2_plate_match_guard` 形成双保险。
+
+### 车头 AI（`qwen_vl/predict_ai.py`）
+
+- **[提示词] 注入系统裁切状态与不对称裁切规则**
+  - 新增 `_build_head_crop_context` / `_build_main_tail_crop_context`，将 `crop_status` 写入提示词供模型采信；
+  - **C1–C3 不对称裁切**：仅一侧裁切失败时，先观察失败侧是否仍有目标车辆；无车 → `fake_plate`（车头）或 `unknown`（主视角车尾）；有车但为全景 → 进入全景 vs 特写规则；
+  - **P1–P3 全景 vs 特写**：禁止比对小结构（格栅条纹、栏板纹理等），只比整体轮廓/布局；仍不可比 → reason 写「输入图片质量太差，AI无法判断」、`label=unknown`，禁止强行定案。
+
+- **[输出格式] 新增 `unknown` label**
+  - 车头 label 支持 `fake_plate` / `normal` / `unknown`；主视角车尾支持 `change_trailer` / `normal` / `unknown`；
+  - `check_head_with_reason` / `check_tail_with_reason` 新增 `crop_status` 参数透传。
+
+### 尾部视角车尾 AI（`qwen_vl/predict_ai_shijiao2.py`）
+
+- **[H2 硬拦截] 解析层 `_apply_h2_plate_match_guard`**
+  - 双侧挂车尾部可见且 `plate_or_number_consistency=一致` 时，无论模型原结论如何，强制 `label=正常`、`structure_consistency=未检验`；
+  - 原换挂/无法判断结论写入 reason 附注，打印 `[tail-ai] H2 guard adjusted label` 日志。
+
+- **[提示词] Tier-A 与 H2 优先级对齐**
+  - Step2 Tier-A 明确为「仅当 `plate_or_number_consistency=无法确认` 时作为主判断依据」；H2 已成立（编号一致）时 Tier-A 结构结论一律无效；
+  - Step3 色相交叉校验、Step5 结论均补充「若 `plate_or_number_consistency=一致`，结构差异不适用」；
+  - Step5 新增 H2 优先条目：双侧同类编号关键位一致 → 直接正常，禁止再引用 Tier-A/Tier-B 结构差异。
+
+### 备份整理
+
+- 更新 `备份/0607/`（`my_predict_gui_new.py`、`predict_ai.py`、`predict_ai_shijiao2.py`），同步裁切守护与 H2 拦截逻辑。
+
+### 工具脚本
+
+- 新增 `scripts/gen_summary_0522_0531.py`：生成 0522–0531 阶段总结 Word 文档。
+
