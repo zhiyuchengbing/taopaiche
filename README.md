@@ -1289,3 +1289,25 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
 
 - 新增 `scripts/gen_summary_0522_0531.py`：生成 0522–0531 阶段总结 Word 文档。
 
+## 2026-08-04
+
+- **[新增] 统计汇总接口 `/stats/summary`**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 功能：提供日期范围内的请求统计汇总，包括总请求数、平均耗时、按类型（正常/换挂/套牌/异常）分类统计、耗时区间分析（<3s/3-60s/60-150s/>150s）、按端点分类统计
+  - 参数：`start_date`、`end_date`（格式：YYYY-MM-DD）
+  - 返回：包含 `summary`、`latency_analysis`、`by_endpoint`、`recent` 的 JSON 结构
+
+- **[重构] 判定函数统一调用 `_classify_with_ai_second_judge`**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：将所有预测接口（`/predict`、`/predict_preview`、`/predict_upload`、`/predict_upload_preview`）中的判定函数调用从 `_classify_with_head_ocr_precheck` 统一改为 `_classify_with_ai_second_judge`
+  - 效果：统一判定链路入口，确保所有预测接口使用相同的 AI 二次判断逻辑
+
+- **[调整] 记录查询接口参数优化**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：`/api/records` 接口参数从 `include_deleted` 改为 `time_filter`，支持更灵活的时间过滤选项
+  - 效果：提供更精细的记录查询时间过滤能力
+
+- **[新增] 车辆裁切工具副本**
+  - 文件：`data_chuli/demo/demo/data_chuli/cropper.py`
+  - 功能：车辆检测与裁切工具的副本，使用 YOLO 检测车辆并裁切最大目标，支持车牌打码功能
+  - 说明：作为独立模块提供，便于其他模块复用车辆裁切预处理功能
