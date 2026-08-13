@@ -13,8 +13,11 @@ import csv
 import zipfile
 import tempfile
 import re
+import random
 from collections import deque
 from typing import Optional, Tuple, Dict, Any, List
+
+import requests
 
 import numpy as np
 import cv2
@@ -27,6 +30,8 @@ from data_tran.image_resolver import ImagePathResolver
 from qwen_vl.predict_ai import VehicleCheck
 from qwen_vl.predict_ai_shijiao2 import TailVehicleCheck
 from chewei_detect.chewei_detect import VehicleCropper as TailViewCropper
+from plate_char_det import CharReader
+from plate_char_det.char_reader import fmt_seq as _fmt_char_seq
 
 parent_dir = os.path.dirname(os.path.dirname(__file__))
 if parent_dir not in sys.path:
@@ -40,6 +45,7 @@ _PIPELINE_LOCK = threading.Lock()
 _INITIALIZED = False
 
 _CROPPER: Optional[MainVehicleCropper] = None
+_CROPPER_UNMASKED: Optional[MainVehicleCropper] = None
 _HEAD_MODEL: Optional[Siamese] = None
 _TAIL_MODEL: Optional[Siamese] = None
 _HEADTAIL_MODEL: Optional[YOLO] = None
@@ -47,14 +53,38 @@ _TAIL_VIEW_CROPPER: Optional[TailViewCropper] = None
 _IMAGE_RESOLVER: Optional[ImagePathResolver] = None
 _AI_CHECKER: Optional[VehicleCheck] = None
 _AI_TAIL_CHECKER: Optional[TailVehicleCheck] = None
+_CHAR_READER: Optional[CharReader] = None
 
 _DEFAULT_HEAD_THRESHOLD = float(os.environ.get("HEAD_THRESHOLD_DEFAULT", "0.8"))
 _DEFAULT_TAIL_THRESHOLD = float(os.environ.get("TAIL_THRESHOLD_DEFAULT", "0.8"))
+_DEFAULT_TAIL_CHAR_THRESHOLD = float(os.environ.get("TAIL_CHAR_THRESHOLD_DEFAULT", "0.85"))
 _DIRECT_FAKE_PLATE_HEAD_THRESHOLD = float(os.environ.get("DIRECT_FAKE_PLATE_HEAD_THRESHOLD", "0.1"))
 _THRESHOLDS_FILE = os.path.join(os.path.dirname(__file__), "thresholds.json")
 _THRESHOLD_LOCK = threading.Lock()
 _HEAD_THRESHOLD: float = _DEFAULT_HEAD_THRESHOLD
 _TAIL_THRESHOLD: float = _DEFAULT_TAIL_THRESHOLD
+_TAIL_CHAR_THRESHOLD: float = _DEFAULT_TAIL_CHAR_THRESHOLD
+
+# 评估运行状态（后台线程 + 前端轮询）
+_EVAL_STATE: Dict[str, Any] = {
+    "running": False,
+    "total": 0,
+    "processed": 0,
+    "success": 0,
+    "failed": 0,
+    "current_index": 0,
+    "current_sample": "",
+    "message": "",
+    "errors": [],
+    "results": [],
+    "started_at": None,
+    "finished_at": None,
+    "run_id": None,
+    "metrics": None,
+    "avg_lat_ms": None,
+    "per_category": None,
+}
+_EVAL_STATE_LOCK = threading.Lock()
 
 
 def _validate_threshold_value(name: str, value: Any) -> float:
@@ -72,13 +102,14 @@ def _save_threshold_settings() -> None:
     payload = {
         "head_threshold": _HEAD_THRESHOLD,
         "tail_threshold": _TAIL_THRESHOLD,
+        "tail_char_threshold": _TAIL_CHAR_THRESHOLD,
     }
     with open(_THRESHOLDS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def _load_threshold_settings() -> None:
-    global _HEAD_THRESHOLD, _TAIL_THRESHOLD
+    global _HEAD_THRESHOLD, _TAIL_THRESHOLD, _TAIL_CHAR_THRESHOLD
 
     if not os.path.exists(_THRESHOLDS_FILE):
 
@@ -95,10 +126,15 @@ def _load_threshold_settings() -> None:
             "tail_threshold",
             payload.get("tail_threshold", _DEFAULT_TAIL_THRESHOLD),
         )
+        _TAIL_CHAR_THRESHOLD = _validate_threshold_value(
+            "tail_char_threshold",
+            payload.get("tail_char_threshold", _DEFAULT_TAIL_CHAR_THRESHOLD),
+        )
     except Exception as e:
         print(f"[thresholds] failed to load {_THRESHOLDS_FILE}: {e}")
         _HEAD_THRESHOLD = _DEFAULT_HEAD_THRESHOLD
         _TAIL_THRESHOLD = _DEFAULT_TAIL_THRESHOLD
+        _TAIL_CHAR_THRESHOLD = _DEFAULT_TAIL_CHAR_THRESHOLD
 
 
 _load_threshold_settings()
@@ -492,8 +528,9 @@ class _MetricsStore:
             record_path = os.path.join(date_path, record_id)
             os.makedirs(record_path, exist_ok=True)
 
-            # 保存6张处理后的图片
-            for key in ["vehicle1", "vehicle2", "head1", "head2", "tail1", "tail2"]:
+            # 保存6张处理后的图片 (+ 未遮挡车辆裁剪图)
+            for key in ["vehicle1", "vehicle2", "head1", "head2", "tail1", "tail2",
+                        "vehicle1_unmasked", "vehicle2_unmasked"]:
                 data_url = previews.get(key, "")
                 if not data_url or not data_url.startswith("data:image/"):
                     continue
@@ -515,6 +552,7 @@ class _MetricsStore:
                 for key in [
                     "original1", "original2", "original3", "original4",
                     "tail_view_crop3", "tail_view_crop4",
+                    "tail_view_crop3_boxed", "tail_view_crop4_boxed",
                 ]:
                     data_url = original_images.get(key, "")
                     if not data_url or not data_url.startswith("data:image/"):
@@ -547,6 +585,7 @@ class _MetricsStore:
             end_date: Optional[str] = None,
             case_type: Optional[str] = None,
             time_filter: Optional[str] = None,
+            review_filter: Optional[str] = None,
             limit: int = 50,
             offset: int = 0
     ) -> Dict[str, Any]:
@@ -558,6 +597,7 @@ class _MetricsStore:
             end_date: 结束日期 YYYY-MM-DD
             case_type: 类型筛选 normal/fake_plate/change_trailer/all
             time_filter: 耗时筛选 lt3/3to60/60to150/gt150/all
+            review_filter: 复核筛选 reviewed/unreviewed/all
             limit: 返回条数
             offset: 偏移量
 
@@ -618,6 +658,14 @@ class _MetricsStore:
                                                 continue
                                         except (ValueError, TypeError):
                                             continue
+
+                                # 复核筛选
+                                if review_filter:
+                                    reviewed = record.get("reviewed", False)
+                                    if review_filter == "reviewed" and not reviewed:
+                                        continue
+                                    elif review_filter == "unreviewed" and reviewed:
+                                        continue
 
                                 # 只保留有 record_id 的记录（有图片的）
                                 if "record_id" in record:
@@ -1770,6 +1818,24 @@ def _record_metric(
         crop_status: Optional[Dict[str, Any]] = None,
         head_ai_decision_source: Optional[str] = None,
         main_tail_ai_decision_source: Optional[str] = None,
+        char_compare_used: bool = False,
+        char_compare_verdict: str = "",
+        char_compare_plate_type: str = "",
+        char_compare_R: Optional[int] = None,
+        char_compare_M: Optional[int] = None,
+        char_compare_U: Optional[int] = None,
+        char_compare_p3_seq: str = "",
+        char_compare_p4_seq: str = "",
+        char_compare_p3_status: str = "",
+        char_compare_p4_status: str = "",
+        char_chegua3_seq: str = "",
+        char_chegua4_seq: str = "",
+        char_fangdahao3_seq: str = "",
+        char_fangdahao4_seq: str = "",
+        char_p3_chegua_status: str = "",
+        char_p3_fangdahao_status: str = "",
+        char_p4_chegua_status: str = "",
+        char_p4_fangdahao_status: str = "",
 ) -> Optional[str]:
     """
     记录指标并保存图片
@@ -1830,6 +1896,24 @@ def _record_metric(
             "crop_status": crop_status,
             "head_ai_decision_source": head_ai_decision_source,
             "main_tail_ai_decision_source": main_tail_ai_decision_source,
+            "char_compare_used": bool(char_compare_used),
+            "char_compare_verdict": char_compare_verdict or "",
+            "char_compare_plate_type": char_compare_plate_type or "",
+            "char_compare_R": char_compare_R,
+            "char_compare_M": char_compare_M,
+            "char_compare_U": char_compare_U,
+            "char_compare_p3_seq": char_compare_p3_seq or "",
+            "char_compare_p4_seq": char_compare_p4_seq or "",
+            "char_compare_p3_status": char_compare_p3_status or "",
+            "char_compare_p4_status": char_compare_p4_status or "",
+            "char_chegua3_seq": char_chegua3_seq or "",
+            "char_chegua4_seq": char_chegua4_seq or "",
+            "char_fangdahao3_seq": char_fangdahao3_seq or "",
+            "char_fangdahao4_seq": char_fangdahao4_seq or "",
+            "char_p3_chegua_status": char_p3_chegua_status or "",
+            "char_p3_fangdahao_status": char_p3_fangdahao_status or "",
+            "char_p4_chegua_status": char_p4_chegua_status or "",
+            "char_p4_fangdahao_status": char_p4_fangdahao_status or "",
             "endpoint": endpoint,
             "source": source,
             "lat_ms": lat_ms,
@@ -1892,6 +1976,24 @@ def _record_metric(
         "crop_status": crop_status,
         "head_ai_decision_source": head_ai_decision_source,
         "main_tail_ai_decision_source": main_tail_ai_decision_source,
+        "char_compare_used": bool(char_compare_used),
+        "char_compare_verdict": char_compare_verdict or "",
+        "char_compare_plate_type": char_compare_plate_type or "",
+        "char_compare_R": char_compare_R,
+        "char_compare_M": char_compare_M,
+        "char_compare_U": char_compare_U,
+        "char_compare_p3_seq": char_compare_p3_seq or "",
+        "char_compare_p4_seq": char_compare_p4_seq or "",
+        "char_compare_p3_status": char_compare_p3_status or "",
+        "char_compare_p4_status": char_compare_p4_status or "",
+        "char_chegua3_seq": char_chegua3_seq or "",
+        "char_chegua4_seq": char_chegua4_seq or "",
+        "char_fangdahao3_seq": char_fangdahao3_seq or "",
+        "char_fangdahao4_seq": char_fangdahao4_seq or "",
+        "char_p3_chegua_status": char_p3_chegua_status or "",
+        "char_p3_fangdahao_status": char_p3_fangdahao_status or "",
+        "char_p4_chegua_status": char_p4_chegua_status or "",
+        "char_p4_fangdahao_status": char_p4_fangdahao_status or "",
     }
 
     if record_id:
@@ -2016,7 +2118,7 @@ class VehiclePairPredictor:
 
 
 def _init_models() -> None:
-    global _INITIALIZED, _CROPPER, _HEAD_MODEL, _TAIL_MODEL, _HEADTAIL_MODEL, _TAIL_VIEW_CROPPER, _IMAGE_RESOLVER, _AI_CHECKER, _AI_TAIL_CHECKER
+    global _INITIALIZED, _CROPPER, _CROPPER_UNMASKED, _HEAD_MODEL, _TAIL_MODEL, _HEADTAIL_MODEL, _TAIL_VIEW_CROPPER, _IMAGE_RESOLVER, _AI_CHECKER, _AI_TAIL_CHECKER, _CHAR_READER
     if _INITIALIZED:
         return
     with _INIT_LOCK:
@@ -2037,6 +2139,11 @@ def _init_models() -> None:
         )
 
         _CROPPER = MainVehicleCropper()
+        try:
+            _CROPPER_UNMASKED = MainVehicleCropper(mask_plates=False)
+        except Exception as e:
+            _CROPPER_UNMASKED = None
+            print(f"[predict] failed to initialize unmasked vehicle cropper: {e}")
         _HEAD_MODEL = Siamese(model_path=head_model_path)
         _TAIL_MODEL = Siamese(model_path=tail_model_path)
         _HEADTAIL_MODEL = YOLO(headtail_model_path)
@@ -2059,7 +2166,28 @@ def _init_models() -> None:
             _AI_TAIL_CHECKER = TailVehicleCheck(model_name=tail_ai_model_name)
             print(f"[predict] 3/4视角车尾AI判断已启用, 模型: {tail_ai_model_name}")
 
+        if _CHAR_READER is None:
+            try:
+                _CHAR_READER = CharReader()
+                print("[predict] 方案B 字符检测已初始化 (模型懒加载)")
+            except Exception as e:
+                _CHAR_READER = None
+                print(f"[predict] 方案B 字符检测初始化失败: {e}")
+
         _INITIALIZED = True
+
+
+def _warmup_char_reader() -> None:
+    """启动时预热方案B字符检测 (首次请求不再等 ~10s 模型加载).
+    失败仅打印并保留懒加载兜底, 不影响服务启动."""
+    global _CHAR_READER
+    try:
+        if _CHAR_READER is None:
+            _CHAR_READER = CharReader()
+        _CHAR_READER.warmup()
+        print("[predict] 方案B 字符检测预热完成", flush=True)
+    except Exception as e:
+        print(f"[predict] 方案B 字符检测预热失败(将懒加载): {e}", flush=True)
 
 
 def _ai_second_judge_enabled() -> bool:
@@ -2105,6 +2233,19 @@ def _build_classification_result() -> Dict[str, Any]:
         "crop_status": None,
         "head_ai_decision_source": None,
         "main_tail_ai_decision_source": None,
+        # 方案B 字符检测字段
+        "char_compare_used": False,
+        "char_compare_verdict": None,
+        "char_compare_plate_type": None,
+        "char_compare_R": None,
+        "char_compare_M": None,
+        "char_compare_U": None,
+        "char_compare_p3_seq": None,
+        "char_compare_p4_seq": None,
+        "char_compare_p3_status": None,
+        "char_compare_p4_status": None,
+        "char_compare_fallback_reason": None,
+        "timing_ms": {},
     }
 
 
@@ -2180,7 +2321,12 @@ def _populate_ai_trace_texts(result: Dict[str, Any], head_prob: Optional[float])
         elif not head_ai_used and head_prob is not None and head_prob <= _HEAD_THRESHOLD:
             final_diff_summary = "套牌：车头相似度低于阈值，判定为套牌"
     elif case_type == "change_trailer":
-        if main_tail_ai_display_text:
+        if result.get("tail_ai_mode") == "char_compare_change":
+            # 尾部字符检测不一致直接判换挂: 固定格式
+            p3 = str(result.get("char_compare_p3_seq") or "")
+            p4 = str(result.get("char_compare_p4_seq") or "")
+            final_diff_summary = f"换挂：车挂号/放大号{p3}vs{p4}明显不同，判定为换挂"
+        elif main_tail_ai_display_text:
             full_reason = _clean_reason_text(result.get("ai_tail_reason"))
             final_diff_summary = f"换挂：{full_reason}" if full_reason else "换挂"
         elif tail34_ai_display_text:
@@ -2317,20 +2463,23 @@ def _crop_tail_view_image(path: str) -> Tuple[Optional[Image.Image], Optional[st
 def _prepare_tail_view_assets(
         path3: Optional[str],
         path4: Optional[str],
-) -> Tuple[Optional[Tuple[str, str]], Optional[Dict[str, str]], List[str], Optional[str]]:
+) -> Tuple[Optional[Tuple[str, str]], Optional[Dict[str, str]], List[str], Optional[str], Optional[Dict[int, np.ndarray]]]:
     if not path3 or not path4:
-        return None, None, [], None
+        return None, None, [], None, None
 
     temp_files: List[str] = []
     merged: Dict[str, str] = {}
     ai_paths: List[str] = []
+    bgr_crops: Dict[int, np.ndarray] = {}
 
     for idx, path in ((3, str(path3)), (4, str(path4))):
         cropped_pil, err = _crop_tail_view_image(path)
         if cropped_pil is None:
-            return None, None, temp_files, err or f"failed to crop tail view {idx}"
+            return None, None, temp_files, err or f"failed to crop tail view {idx}", None
 
         merged[f"tail_view_crop{idx}"] = _pil_to_original_data_url(cropped_pil)
+        # 保留 BGR 车辆图, 供方案B字符比对复用, 避免二次裁剪
+        bgr_crops[idx] = np.ascontiguousarray(np.array(cropped_pil)[:, :, ::-1])
 
         temp_path = _save_pil_to_temp(cropped_pil, prefix=f"tail_view_{idx}")
         if temp_path:
@@ -2339,7 +2488,163 @@ def _prepare_tail_view_assets(
         else:
             ai_paths.append(path)
 
-    return (ai_paths[0], ai_paths[1]), merged, temp_files, None
+    return (ai_paths[0], ai_paths[1]), merged, temp_files, None, bgr_crops
+
+
+# ── 方案B 字符检测辅助 ──────────────────────────────────────────────
+
+def _run_char_compare(path3: str, path4: str, pre_cropped=None) -> Dict[str, Any]:
+    """运行方案B 字符比对, 异常时返回作废结果 (不抛异常).
+
+    pre_cropped: 可选 (bgr3, bgr4) 已裁剪车辆图, 传入则跳过内部二次裁剪.
+    """
+    try:
+        if _CHAR_READER is None:
+            return {"verdict": "作废", "error": "CharReader not initialized"}
+        return _CHAR_READER.compare_pair(path3, path4, pre_cropped=pre_cropped)
+    except Exception as e:
+        return {"verdict": "作废", "error": str(e)}
+
+
+def _run_char_compare_step(result: Dict[str, Any], char_compare_paths, tail_view_bgr) -> Optional[Dict[str, Any]]:
+    """执行方案B 字符比对并填充 result 字段 (高相似短路与 tail_need_ai 共用).
+
+    - 填充 timing_ms.char_compare_ms 与全部 char_compare_*/char_* 字段.
+    - 尾部车辆裁剪图叠加 车挂号/放大号 yolo 框 → tail_view_crop*_boxed.
+    - 返回 CharReader.compare_pair 原始结果 (含 verdict 等); 路径无效时返回 None.
+    """
+    if not char_compare_paths or not char_compare_paths[0] or not char_compare_paths[1]:
+        return None
+    _pre_cropped = None
+    if tail_view_bgr is not None:
+        _b3, _b4 = tail_view_bgr.get(3), tail_view_bgr.get(4)
+        if _b3 is not None and _b4 is not None:
+            _pre_cropped = (_b3, _b4)
+    _t_char0 = time.perf_counter()
+    char_result = _run_char_compare(char_compare_paths[0], char_compare_paths[1], pre_cropped=_pre_cropped)
+    result["timing_ms"]["char_compare_ms"] = round((time.perf_counter() - _t_char0) * 1000.0, 1)
+    result["char_compare_used"] = True
+    result["char_compare_verdict"] = char_result.get("verdict")
+    result["char_compare_plate_type"] = char_result.get("plate_type_used")
+    result["char_compare_R"] = char_result.get("R")
+    result["char_compare_M"] = char_result.get("M")
+    result["char_compare_U"] = char_result.get("U")
+    result["char_compare_p3_seq"] = _fmt_char_seq(char_result.get("p3_seq", []))
+    result["char_compare_p4_seq"] = _fmt_char_seq(char_result.get("p4_seq", []))
+    result["char_compare_p3_status"] = char_result.get("p3_status")
+    result["char_compare_p4_status"] = char_result.get("p4_status")
+    result["char_chegua3_seq"] = _fmt_char_seq(char_result.get("p3_chegua_seq", []), conf_line=0.70)
+    result["char_chegua4_seq"] = _fmt_char_seq(char_result.get("p4_chegua_seq", []), conf_line=0.70)
+    result["char_fangdahao3_seq"] = _fmt_char_seq(char_result.get("p3_fangdahao_seq", []), conf_line=0.90)
+    result["char_fangdahao4_seq"] = _fmt_char_seq(char_result.get("p4_fangdahao_seq", []), conf_line=0.90)
+    result["char_p3_chegua_status"] = char_result.get("p3_chegua_status")
+    result["char_p3_fangdahao_status"] = char_result.get("p3_fangdahao_status")
+    result["char_p4_chegua_status"] = char_result.get("p4_chegua_status")
+    result["char_p4_fangdahao_status"] = char_result.get("p4_fangdahao_status")
+    # 尾部车辆裁剪图叠加 车挂号/放大号 yolo 框 (供详情页展示)
+    if tail_view_bgr is not None:
+        _b3 = tail_view_bgr.get(3)
+        _b4 = tail_view_bgr.get(4)
+        if _b3 is not None and _b4 is not None:
+            _boxed3 = _draw_plate_boxes(
+                _b3,
+                char_result.get("p3_chegua_boxes", []),
+                char_result.get("p3_fangdahao_boxes", []),
+            )
+            _boxed4 = _draw_plate_boxes(
+                _b4,
+                char_result.get("p4_chegua_boxes", []),
+                char_result.get("p4_fangdahao_boxes", []),
+            )
+            result["tail_view_crop3_boxed"] = _bgr_to_data_url(_boxed3)
+            result["tail_view_crop4_boxed"] = _bgr_to_data_url(_boxed4)
+    return char_result
+
+
+def _bgr_to_data_url(bgr) -> str:
+    """BGR 图像转 data URL (中文路径安全: cv2.imencode + base64)."""
+    if bgr is None:
+        return ""
+    ok, buf = cv2.imencode(".jpg", bgr)
+    if not ok:
+        return ""
+    import base64
+    return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def _draw_plate_boxes(bgr, chegua_boxes, fangdahao_boxes):
+    """在图像上叠加 车挂号(绿)/放大号(蓝) yolo 框与标签, 返回新图(不改原图)."""
+    if bgr is None:
+        return bgr
+    img = bgr.copy()
+    for (x1, y1, x2, y2) in (chegua_boxes or []):
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 200, 0), 2)
+        cv2.putText(img, "chegua", (int(x1), max(int(y1) - 5, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1, cv2.LINE_AA)
+    for (x1, y1, x2, y2) in (fangdahao_boxes or []):
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (255, 140, 0), 2)
+        cv2.putText(img, "fangdahao", (int(x1), max(int(y1) - 5, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 140, 0), 1, cv2.LINE_AA)
+    return img
+
+
+def _char_metric_kwargs(ai_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """从 ai_result 提取字符检测字段, 用于 _record_metric 的 **kwargs 展开."""
+    r = ai_result or {}
+    return {
+        "char_compare_used": bool(r.get("char_compare_used")),
+        "char_compare_verdict": str(r.get("char_compare_verdict") or ""),
+        "char_compare_plate_type": str(r.get("char_compare_plate_type") or ""),
+        "char_compare_R": r.get("char_compare_R"),
+        "char_compare_M": r.get("char_compare_M"),
+        "char_compare_U": r.get("char_compare_U"),
+        "char_compare_p3_seq": str(r.get("char_compare_p3_seq") or ""),
+        "char_compare_p4_seq": str(r.get("char_compare_p4_seq") or ""),
+        "char_compare_p3_status": str(r.get("char_compare_p3_status") or ""),
+        "char_compare_p4_status": str(r.get("char_compare_p4_status") or ""),
+        "char_chegua3_seq": str(r.get("char_chegua3_seq") or ""),
+        "char_chegua4_seq": str(r.get("char_chegua4_seq") or ""),
+        "char_fangdahao3_seq": str(r.get("char_fangdahao3_seq") or ""),
+        "char_fangdahao4_seq": str(r.get("char_fangdahao4_seq") or ""),
+        "char_p3_chegua_status": str(r.get("char_p3_chegua_status") or ""),
+        "char_p3_fangdahao_status": str(r.get("char_p3_fangdahao_status") or ""),
+        "char_p4_chegua_status": str(r.get("char_p4_chegua_status") or ""),
+        "char_p4_fangdahao_status": str(r.get("char_p4_fangdahao_status") or ""),
+    }
+
+
+def _merge_boxed_tail_images(original_images, ai_result):
+    """把尾部视角带 yolo 框的 data URL 并入 original_images (供落盘保存)."""
+    if original_images is None:
+        original_images = {}
+    for _key, _url in (
+        ("tail_view_crop3_boxed", (ai_result or {}).get("tail_view_crop3_boxed") or ""),
+        ("tail_view_crop4_boxed", (ai_result or {}).get("tail_view_crop4_boxed") or ""),
+    ):
+        if _url:
+            original_images[_key] = _url
+    return original_images
+
+
+def _build_char_hint(char_result: Dict[str, Any]) -> str:
+    """构建字符检测摘要文本, 用于注入 AI prompt.
+    char_result 为 result 字典 (含已格式化的 char_compare_* 字段)."""
+    if not char_result or not char_result.get("char_compare_used"):
+        return ""
+    verdict = char_result.get("char_compare_verdict") or ""
+    ptype = char_result.get("char_compare_plate_type") or ""
+    R = char_result.get("char_compare_R")
+    M = char_result.get("char_compare_M")
+    U = char_result.get("char_compare_U")
+    s3 = char_result.get("char_compare_p3_seq") or ""
+    s4 = char_result.get("char_compare_p4_seq") or ""
+    parts = [
+        f"[字符检测辅助信息] 类型={ptype} 比对结果={verdict}",
+        f"path3读到: {s3}",
+        f"path4读到: {s4}",
+        f"统计: R={R} M={M} U={U}",
+    ]
+    return "; ".join(parts)
 
 
 _AI_QUALITY_TOO_POOR_MARKERS = ("图片质量太差", "ai无法判断", "AI无法判断")
@@ -2602,6 +2907,16 @@ def _compute_probs_and_previews_pil(
             "tail2": _pil_to_jpeg_data_url(t2),
         }
 
+        # 未遮挡车牌版的车辆裁剪图 (供详情页展示)
+        if _CROPPER_UNMASKED is not None:
+            try:
+                vu1, _ = _CROPPER_UNMASKED.process_pil(img1)
+                vu2, _ = _CROPPER_UNMASKED.process_pil(img2)
+                previews["vehicle1_unmasked"] = _pil_to_jpeg_data_url(vu1)
+                previews["vehicle2_unmasked"] = _pil_to_jpeg_data_url(vu2)
+            except Exception as e:
+                print(f"[predict] failed to build unmasked vehicle crops: {e}")
+
         # 保留裁切后的PIL图片，用于AI二次判断
         cropped_pils: Dict[str, Image.Image] = {
             "h1": h1, "h2": h2, "t1": t1, "t2": t2,
@@ -2653,6 +2968,21 @@ def _classify_case(head_prob: Optional[float], tail_prob: Optional[float]) -> st
     if head_prob < head_low_th:
         return "fake_plate"
     if head_prob >= head_low_th and tail_prob <= tail_low_th:
+        return "change_trailer"
+    return "normal"
+
+
+def _classify_with_thresholds(
+        head_prob: Optional[float],
+        tail_prob: Optional[float],
+        head_threshold: float,
+        tail_threshold: float) -> str:
+    """度量学习初判：镜像 _classify_case，但用显式阈值（评估口径用运行时刻的阈值）"""
+    if head_prob is None or tail_prob is None:
+        return "abnormal"
+    if head_prob < head_threshold:
+        return "fake_plate"
+    if head_prob >= head_threshold and tail_prob <= tail_threshold:
         return "change_trailer"
     return "normal"
 
@@ -2731,6 +3061,8 @@ def _classify_with_ai_second_judge_internal(
         force_head_ai_recheck: bool = False,
         ocr_match: Optional[bool] = None,
         crop_status: Optional[Dict[str, Any]] = None,
+        char_compare_paths: Optional[Tuple[str, str]] = None,
+        tail_view_bgr: Optional[Dict[int, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """
     两层鉴别分类：
@@ -2805,11 +3137,33 @@ def _classify_with_ai_second_judge_internal(
     stage1_case_type = _classify_case(head_prob, tail_prob)
     result["stage1_case_type"] = stage1_case_type
 
+    char_compare_paths_valid = bool(
+        char_compare_paths and char_compare_paths[0] and char_compare_paths[1]
+    )
+
     if (
         (not force_head_ai_recheck)
         and head_prob > head_direct_normal_th
         and tail_prob > tail_direct_normal_th
     ):
+        # 高相似短路前先做字符比对: 修复 0.99+ 相似但放大号/车挂号不一致的换挂漏检
+        if char_compare_paths_valid and _CHAR_READER is not None:
+            _char_res = _run_char_compare_step(result, char_compare_paths, tail_view_bgr)
+            if _char_res is not None and _char_res.get("verdict") == "不一致":
+                _reason = (
+                    f"字符比对不一致({result.get('char_compare_plate_type')}) "
+                    f"R={result.get('char_compare_R')} M={result.get('char_compare_M')}, 判定换挂"
+                )
+                result["case_type"] = "change_trailer"
+                result["tail_ai_mode"] = "char_compare_change"
+                result["ai_tail_reason"] = _reason
+                result["ai_judge_used"] = True
+                result["ai_ms"] = float(result["timing_ms"].get("char_compare_ms", 0.0) or 0.0)
+                result["diff_desc"] = _reason
+                result["diff_analyzed_part"] = "tail"
+                result["ai_diff_ms"] = 0.0
+                print("[predict] high-sim path char compare -> 不一致, flip to change_trailer")
+                return _populate_ai_trace_texts(result, head_prob)
         result["case_type"] = "normal"
         return _populate_ai_trace_texts(result, head_prob)
 
@@ -2848,12 +3202,14 @@ def _classify_with_ai_second_judge_internal(
                 low_similarity_fallback_label = (
                     "fake_plate" if head_prob is not None and head_prob <= head_direct_normal_th else "normal"
                 )
+                _t_head_ai_0 = time.perf_counter()
                 ai_head_payload = _AI_CHECKER.check_head_with_reason(
                     h1_path,
                     h2_path,
                     low_similarity_fallback_label=low_similarity_fallback_label,
                     crop_status=crop_status,
                 )
+                result["timing_ms"]["head_ai_ms"] = round((time.perf_counter() - _t_head_ai_0) * 1000.0, 1)
                 head_label, ai_head_reason, head_decision_source = _resolve_head_ai_with_crop_guard(
                     ai_head_payload,
                     head_prob,
@@ -2892,17 +3248,57 @@ def _classify_with_ai_second_judge_internal(
             print("[predict] head AI concluded fake_plate, skipping all tail AI analysis")
             return _populate_ai_trace_texts(result, head_prob)
 
-        if tail_need_ai and use_tail_original_ai and _AI_TAIL_CHECKER is not None:
+        # === 方案B 字符检测优先判断 ===
+        if tail_need_ai and char_compare_paths_valid:
+            char_result = _run_char_compare_step(result, char_compare_paths, tail_view_bgr) or {}
+            char_verdict = char_result.get("verdict")
+            if char_verdict == "一致":
+                if tail_prob is not None and tail_prob > _TAIL_CHAR_THRESHOLD:
+                    # 字符一致 + 尾部相似度 > 阈值 → 直接判定正常, 跳过AI
+                    tail_verdict = "same"
+                    ai_tail_reason = (
+                        f"字符比对一致({char_result.get('plate_type_used')}) "
+                        f"R={char_result.get('R')} M={char_result.get('M')}, "
+                        f"相似度{tail_prob:.4f}>{_TAIL_CHAR_THRESHOLD}, 直接判定正常"
+                    )
+                    result["tail_ai_mode"] = "char_compare_normal"
+                else:
+                    # 字符一致但相似度不够 → 仍需 AI 复核
+                    result["tail_ai_mode"] = "char_agree_but_low_sim"
+                    result["char_compare_fallback_reason"] = (
+                        f"字符一致但尾部相似度{tail_prob if tail_prob is not None else '未知'}"
+                        f"<=阈值{_TAIL_CHAR_THRESHOLD}, 交AI复核"
+                    )
+            elif char_verdict == "不一致":
+                # 字符不一致 → 直接判定换挂, 跳过AI
+                tail_verdict = "different"
+                ai_tail_reason = (
+                    f"字符比对不一致({char_result.get('plate_type_used')}) "
+                    f"R={char_result.get('R')} M={char_result.get('M')}, 直接判定换挂"
+                )
+                result["tail_ai_mode"] = "char_compare_change"
+            elif char_verdict in ("无法判断", "作废"):
+                # 字符无法判断 → 回退 AI (带字符摘要)
+                result["tail_ai_mode"] = "char_undetermined_fallback_to_ai"
+                result["char_compare_fallback_reason"] = char_result.get("error")
+            else:
+                result["tail_ai_mode"] = "tail34_cropped_primary"
+
+        if tail_need_ai and tail_verdict is None and use_tail_original_ai and _AI_TAIL_CHECKER is not None:
             print("[predict] tail similarity is below threshold, running 3/4 cropped tail-view AI first")
             result["tail_second_check_used"] = True
-            result["tail_ai_mode"] = "tail34_cropped_primary"
+            if not result.get("tail_ai_mode") or result["tail_ai_mode"] in ("char_agree_but_low_sim", "char_undetermined_fallback_to_ai"):
+                result["tail_ai_mode"] = "tail34_cropped_primary"
             try:
+                _t_tail34_0 = time.perf_counter()
                 ai_tail_payload = _apply_tail34_h2_guard(
                     _AI_TAIL_CHECKER.check_tail_on_original(
                         tail_original_paths[0],
                         tail_original_paths[1],
+                        char_hint=_build_char_hint(result),
                     )
                 )
+                result["timing_ms"]["tail34_ai_ms"] = round((time.perf_counter() - _t_tail34_0) * 1000.0, 1)
                 tail_second_label = str(ai_tail_payload.get("label") or "").strip()
                 tail_second_reason = str(ai_tail_payload.get("reason") or "").strip()
                 tail_number_consistency = str(ai_tail_payload.get("plate_or_number_consistency") or "").strip()
@@ -2947,12 +3343,14 @@ def _classify_with_ai_second_judge_internal(
                 main_tail_fallback_label = _main_tail_similarity_fallback_label(
                     tail_prob, tail_direct_normal_th
                 )
+                _t_main_tail_0 = time.perf_counter()
                 ai_tail_payload = _AI_CHECKER.check_tail_with_reason(
                     t1_path,
                     t2_path,
                     low_similarity_fallback_label=main_tail_fallback_label,
                     crop_status=crop_status,
                 )
+                result["timing_ms"]["main_tail_ai_ms"] = round((time.perf_counter() - _t_main_tail_0) * 1000.0, 1)
                 main_tail_label, ai_tail_reason, main_tail_decision_source = _resolve_main_tail_ai_with_crop_guard(
                     ai_tail_payload,
                     tail_prob,
@@ -3091,6 +3489,8 @@ def _classify_with_ai_second_judge(
         cropped_pils: Optional[Dict[str, Image.Image]] = None,
         tail_original_paths: Optional[Tuple[str, str]] = None,
         crop_status: Optional[Dict[str, Any]] = None,
+        char_compare_paths: Optional[Tuple[str, str]] = None,
+        tail_view_bgr: Optional[Dict[int, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     result = _build_classification_result()
     result["stage1_case_type"] = _classify_case(head_prob, tail_prob)
@@ -3112,6 +3512,8 @@ def _classify_with_ai_second_judge(
         tail_original_paths=tail_original_paths,
         force_head_ai_recheck=False,
         crop_status=crop_status,
+        char_compare_paths=char_compare_paths,
+        tail_view_bgr=tail_view_bgr,
     )
     downstream.update(ocr_result)
     return _populate_ai_trace_texts(downstream, head_prob)
@@ -3133,6 +3535,8 @@ def _append_ai_trace_fields(resp: Dict[str, Any], ai_result: Dict[str, Any]) -> 
         resp["head_ai_decision_source"] = ai_result.get("head_ai_decision_source")
     if ai_result.get("main_tail_ai_decision_source") is not None:
         resp["main_tail_ai_decision_source"] = ai_result.get("main_tail_ai_decision_source")
+    if ai_result.get("timing_ms"):
+        resp["timing_ms"] = ai_result.get("timing_ms")
     return resp
 
 
@@ -3196,13 +3600,51 @@ def stats_reset() -> Any:
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _parse_bucket_edges(raw: str) -> List[float]:
+    """解析 bucket_edges 参数: 逗号分隔秒, 如 '3,60,150'. 非法/空→缺省 [3,60,150]."""
+    default = [3.0, 60.0, 150.0]
+    if not raw:
+        return default
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        return default
+    try:
+        edges = [float(p) for p in parts]
+    except ValueError:
+        return default
+    edges = sorted(set(e for e in edges if e > 0))
+    if not edges:
+        return default
+    return edges
+
+
+def _latency_bucket_labels(edges: List[float]) -> List[str]:
+    """由边界生成标签: edges=[3,60,150] → ['<3s','3-60s','60-150s','>150s']."""
+    labels = [f"<{int(edges[0])}s"]
+    for i in range(len(edges) - 1):
+        labels.append(f"{int(edges[i])}-{int(edges[i + 1])}s")
+    labels.append(f">{int(edges[-1])}s")
+    return labels
+
+
+def _bucket_label(lat_s: float, edges: List[float], labels: List[str]) -> str:
+    """把秒数归类到对应区间标签."""
+    for i, e in enumerate(edges):
+        if lat_s < e:
+            return labels[i]
+    return labels[-1]
+
+
 @app.get("/api/stats/range")
 def api_stats_range() -> Any:
     """获取指定日期范围的统计数据"""
     try:
         start_date_str = request.args.get("start_date", "").strip()
         end_date_str = request.args.get("end_date", "").strip()
-        
+        bucket_edges = _parse_bucket_edges(request.args.get("bucket_edges", ""))
+        bucket_labels = _latency_bucket_labels(bucket_edges)
+        lat_buckets = {label: 0 for label in bucket_labels}
+
         if not start_date_str or not end_date_str:
             return jsonify({"error": "请提供开始日期和结束日期"}), 400
         
@@ -3227,10 +3669,10 @@ def api_stats_range() -> Any:
         }
         
         latency_analysis = {
-            "总体": {"<3s": 0, "3-60s": 0, "60-150s": 0, ">150s": 0},
-            "正常": {"<3s": 0, "3-60s": 0, "60-150s": 0, ">150s": 0},
-            "换挂": {"<3s": 0, "3-60s": 0, "60-150s": 0, ">150s": 0},
-            "套牌": {"<3s": 0, "3-60s": 0, "60-150s": 0, ">150s": 0},
+            "总体": dict(lat_buckets),
+            "正常": dict(lat_buckets),
+            "换挂": dict(lat_buckets),
+            "套牌": dict(lat_buckets),
         }
         
         total_latency = 0.0
@@ -3258,14 +3700,7 @@ def api_stats_range() -> Any:
                                 
                                 # 按耗时区间分类
                                 lat_s = lat_ms / 1000.0
-                                if lat_s < 3:
-                                    interval = "<3s"
-                                elif lat_s < 60:
-                                    interval = "3-60s"
-                                elif lat_s < 150:
-                                    interval = "60-150s"
-                                else:
-                                    interval = ">150s"
+                                interval = _bucket_label(lat_s, bucket_edges, bucket_labels)
                                 
                                 # 总体统计
                                 latency_analysis["总体"][interval] += 1
@@ -3497,9 +3932,10 @@ def predict() -> Any:
 
         tail_view_temp_paths: List[str] = []
         tail_ai_paths = None
+        tail_view_bgr = None
         if path3_input and path4_input:
             original_images = _append_tail_original_images(original_images, p3, p4)
-            tail_ai_paths, tail_view_images, tail_view_temp_paths, tail_view_err = _prepare_tail_view_assets(p3, p4)
+            tail_ai_paths, tail_view_images, tail_view_temp_paths, tail_view_err, tail_view_bgr = _prepare_tail_view_assets(p3, p4)
             if tail_view_images:
                 if original_images is None:
                     original_images = {}
@@ -3520,8 +3956,12 @@ def predict() -> Any:
             cropped_pils,
             tail_original_paths=tail_ai_paths,
             crop_status=crop_status,
+            char_compare_paths=((p3, p4) if p3 and p4 else None),
+            tail_view_bgr=tail_view_bgr,
         )
         case_type = ai_result["case_type"]
+
+    lat_ms = (time.perf_counter() - t0) * 1000.0
 
     resp: Dict[str, Any] = {
         "ok": case_type != "abnormal",
@@ -3534,6 +3974,26 @@ def predict() -> Any:
         "tail_second_check_used": ai_result.get("tail_second_check_used", False),
         "tail_second_check_result": ai_result.get("tail_second_check_result"),
         "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
+        "char_compare_used": ai_result.get("char_compare_used", False),
+        "char_compare_verdict": ai_result.get("char_compare_verdict"),
+        "char_compare_plate_type": ai_result.get("char_compare_plate_type"),
+        "char_compare_R": ai_result.get("char_compare_R"),
+        "char_compare_M": ai_result.get("char_compare_M"),
+        "char_compare_U": ai_result.get("char_compare_U"),
+        "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
+        "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
+        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
+        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
+        "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
+        "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
+        "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
+        "char_fangdahao4_seq": ai_result.get("char_fangdahao4_seq"),
+        "char_p3_chegua_status": ai_result.get("char_p3_chegua_status"),
+        "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
+        "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
+        "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
+        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
+        "lat_ms": round(lat_ms, 1),
     }
     _append_ai_trace_fields(resp, ai_result)
     if ai_result["ai_judge_used"]:
@@ -3563,7 +4023,9 @@ def predict() -> Any:
         resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
     if err:
         resp["error"] = err
-    lat_ms = (time.perf_counter() - t0) * 1000.0
+
+    # 尾部视角带框图并入 original_images, 供落盘保存
+    _merge_boxed_tail_images(original_images, ai_result)
 
     # 保存图片并记录
     record_id = _record_metric(
@@ -3613,6 +4075,7 @@ def predict() -> Any:
         crop_status=ai_result.get("crop_status"),
         head_ai_decision_source=ai_result.get("head_ai_decision_source"),
         main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
+        **_char_metric_kwargs(ai_result),
     )
 
     if record_id:
@@ -3770,9 +4233,10 @@ def predict_preview() -> Any:
 
         tail_view_temp_paths: List[str] = []
         tail_ai_paths = None
+        tail_view_bgr = None
         if path3_input and path4_input:
             original_images = _append_tail_original_images(original_images, p3, p4)
-            tail_ai_paths, tail_view_images, tail_view_temp_paths, tail_view_err = _prepare_tail_view_assets(p3, p4)
+            tail_ai_paths, tail_view_images, tail_view_temp_paths, tail_view_err, tail_view_bgr = _prepare_tail_view_assets(p3, p4)
             if tail_view_images:
                 if original_images is None:
                     original_images = {}
@@ -3793,6 +4257,8 @@ def predict_preview() -> Any:
             cropped_pils,
             tail_original_paths=tail_ai_paths,
             crop_status=crop_status,
+            char_compare_paths=((p3, p4) if p3 and p4 else None),
+            tail_view_bgr=tail_view_bgr,
         )
         case_type = ai_result["case_type"]
 
@@ -3804,6 +4270,25 @@ def predict_preview() -> Any:
         "previews": previews or {},
         "input_mode": input_mode,
         "tail_ai_mode": ai_result.get("tail_ai_mode", "none"),
+        "char_compare_used": ai_result.get("char_compare_used", False),
+        "char_compare_verdict": ai_result.get("char_compare_verdict"),
+        "char_compare_plate_type": ai_result.get("char_compare_plate_type"),
+        "char_compare_R": ai_result.get("char_compare_R"),
+        "char_compare_M": ai_result.get("char_compare_M"),
+        "char_compare_U": ai_result.get("char_compare_U"),
+        "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
+        "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
+        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
+        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
+        "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
+        "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
+        "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
+        "char_fangdahao4_seq": ai_result.get("char_fangdahao4_seq"),
+        "char_p3_chegua_status": ai_result.get("char_p3_chegua_status"),
+        "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
+        "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
+        "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
+        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
         "stage1_case_type": ai_result.get("stage1_case_type"),
         "tail_second_check_used": ai_result.get("tail_second_check_used", False),
         "tail_second_check_result": ai_result.get("tail_second_check_result"),
@@ -3838,6 +4323,9 @@ def predict_preview() -> Any:
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
+
+    # 尾部视角带框图并入 original_images, 供落盘保存
+    _merge_boxed_tail_images(original_images, ai_result)
 
     # 保存图片并记录
     record_id = _record_metric(
@@ -3887,6 +4375,7 @@ def predict_preview() -> Any:
         crop_status=ai_result.get("crop_status"),
         head_ai_decision_source=ai_result.get("head_ai_decision_source"),
         main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
+        **_char_metric_kwargs(ai_result),
     )
 
     if record_id:
@@ -4007,6 +4496,8 @@ def predict_upload_preview() -> Any:
 
         # 两层鉴别分类（含AI二次判断）
         tail_original_paths = None
+        char_compare_paths = None
+        tail_view_bgr = None
         if f3 and f4:
             p3 = _save_upload_file_to_temp(f3, prefix="upload_tail3")
             p4 = _save_upload_file_to_temp(f4, prefix="upload_tail4")
@@ -4015,8 +4506,9 @@ def predict_upload_preview() -> Any:
             if p4:
                 temp_tail_paths.append(p4)
             if p3 and p4:
+                char_compare_paths = (p3, p4)
                 original_images = _append_tail_original_images(original_images, p3, p4)
-                tail_original_paths, tail_view_images, tail_view_temp_paths, tail_view_err = _prepare_tail_view_assets(p3, p4)
+                tail_original_paths, tail_view_images, tail_view_temp_paths, tail_view_err, tail_view_bgr = _prepare_tail_view_assets(p3, p4)
                 temp_tail_paths.extend(tail_view_temp_paths)
                 if tail_view_images:
                     if original_images is None:
@@ -4036,6 +4528,8 @@ def predict_upload_preview() -> Any:
             cropped_pils,
             tail_original_paths=tail_original_paths,
             crop_status=crop_status,
+            char_compare_paths=char_compare_paths,
+            tail_view_bgr=tail_view_bgr,
         )
         case_type = ai_result["case_type"]
 
@@ -4047,6 +4541,25 @@ def predict_upload_preview() -> Any:
         "previews": previews or {},
         "input_mode": input_mode,
         "tail_ai_mode": ai_result.get("tail_ai_mode", "none"),
+        "char_compare_used": ai_result.get("char_compare_used", False),
+        "char_compare_verdict": ai_result.get("char_compare_verdict"),
+        "char_compare_plate_type": ai_result.get("char_compare_plate_type"),
+        "char_compare_R": ai_result.get("char_compare_R"),
+        "char_compare_M": ai_result.get("char_compare_M"),
+        "char_compare_U": ai_result.get("char_compare_U"),
+        "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
+        "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
+        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
+        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
+        "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
+        "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
+        "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
+        "char_fangdahao4_seq": ai_result.get("char_fangdahao4_seq"),
+        "char_p3_chegua_status": ai_result.get("char_p3_chegua_status"),
+        "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
+        "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
+        "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
+        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
         "stage1_case_type": ai_result.get("stage1_case_type"),
         "tail_second_check_used": ai_result.get("tail_second_check_used", False),
         "tail_second_check_result": ai_result.get("tail_second_check_result"),
@@ -4076,6 +4589,9 @@ def predict_upload_preview() -> Any:
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
+
+    # 尾部视角带框图并入 original_images, 供落盘保存
+    _merge_boxed_tail_images(original_images, ai_result)
 
     # 保存图片并记录
     file1_name = f1.filename if f1 else "unknown"
@@ -4136,6 +4652,7 @@ def predict_upload_preview() -> Any:
         crop_status=ai_result.get("crop_status"),
         head_ai_decision_source=ai_result.get("head_ai_decision_source"),
         main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
+        **_char_metric_kwargs(ai_result),
     )
 
     if record_id:
@@ -4261,6 +4778,8 @@ def predict_upload() -> Any:
 
         # 两层鉴别分类（含AI二次判断）
         tail_original_paths = None
+        char_compare_paths = None
+        tail_view_bgr = None
         if f3 and f4:
             p3 = _save_upload_file_to_temp(f3, prefix="upload_tail3")
             p4 = _save_upload_file_to_temp(f4, prefix="upload_tail4")
@@ -4269,8 +4788,9 @@ def predict_upload() -> Any:
             if p4:
                 temp_tail_paths.append(p4)
             if p3 and p4:
+                char_compare_paths = (p3, p4)
                 original_images = _append_tail_original_images(original_images, p3, p4)
-                tail_original_paths, tail_view_images, tail_view_temp_paths, tail_view_err = _prepare_tail_view_assets(p3, p4)
+                tail_original_paths, tail_view_images, tail_view_temp_paths, tail_view_err, tail_view_bgr = _prepare_tail_view_assets(p3, p4)
                 temp_tail_paths.extend(tail_view_temp_paths)
                 if tail_view_images:
                     if original_images is None:
@@ -4290,6 +4810,8 @@ def predict_upload() -> Any:
             cropped_pils,
             tail_original_paths=tail_original_paths,
             crop_status=crop_status,
+            char_compare_paths=char_compare_paths,
+            tail_view_bgr=tail_view_bgr,
         )
         case_type = ai_result["case_type"]
 
@@ -4304,6 +4826,25 @@ def predict_upload() -> Any:
         "tail_second_check_used": ai_result.get("tail_second_check_used", False),
         "tail_second_check_result": ai_result.get("tail_second_check_result"),
         "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
+        "char_compare_used": ai_result.get("char_compare_used", False),
+        "char_compare_verdict": ai_result.get("char_compare_verdict"),
+        "char_compare_plate_type": ai_result.get("char_compare_plate_type"),
+        "char_compare_R": ai_result.get("char_compare_R"),
+        "char_compare_M": ai_result.get("char_compare_M"),
+        "char_compare_U": ai_result.get("char_compare_U"),
+        "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
+        "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
+        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
+        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
+        "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
+        "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
+        "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
+        "char_fangdahao4_seq": ai_result.get("char_fangdahao4_seq"),
+        "char_p3_chegua_status": ai_result.get("char_p3_chegua_status"),
+        "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
+        "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
+        "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
+        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
     }
     _append_ai_trace_fields(resp, ai_result)
     if ai_result["ai_judge_used"]:
@@ -4334,6 +4875,9 @@ def predict_upload() -> Any:
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
+
+    # 尾部视角带框图并入 original_images, 供落盘保存
+    _merge_boxed_tail_images(original_images, ai_result)
 
     # 保存图片并记录
     file1_name = f1.filename if f1 else "unknown"
@@ -4388,6 +4932,7 @@ def predict_upload() -> Any:
         crop_status=ai_result.get("crop_status"),
         head_ai_decision_source=ai_result.get("head_ai_decision_source"),
         main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
+        **_char_metric_kwargs(ai_result),
     )
 
     if record_id:
@@ -4416,6 +4961,7 @@ def api_query_records() -> Any:
         end_date = request.args.get("end_date")
         case_type = request.args.get("case_type", "all")
         time_filter = request.args.get("time_filter", "all")
+        review_filter = request.args.get("review_filter", "all")
         limit = int(request.args.get("limit", "50"))
         offset = int(request.args.get("offset", "0"))
 
@@ -4424,6 +4970,7 @@ def api_query_records() -> Any:
             end_date=end_date,
             case_type=case_type if case_type != "all" else None,
             time_filter=time_filter if time_filter != "all" else None,
+            review_filter=review_filter if review_filter != "all" else None,
             limit=limit,
             offset=offset
         )
@@ -4454,7 +5001,10 @@ def api_get_image(record_id: str, image_name: str) -> Any:
         valid_names = [
             "original1.jpg", "original2.jpg", "original3.jpg", "original4.jpg",
             "tail_view_crop3.jpg", "tail_view_crop4.jpg",
-            "vehicle1.jpg", "vehicle2.jpg", "head1.jpg", "head2.jpg", "tail1.jpg", "tail2.jpg",
+            "tail_view_crop3_boxed.jpg", "tail_view_crop4_boxed.jpg",
+            "vehicle1.jpg", "vehicle2.jpg",
+            "vehicle1_unmasked.jpg", "vehicle2_unmasked.jpg",
+            "head1.jpg", "head2.jpg", "tail1.jpg", "tail2.jpg",
         ]
         if image_name not in valid_names:
             return jsonify({"error": "无效的图片名称"}), 400
@@ -4471,7 +5021,17 @@ def api_get_image(record_id: str, image_name: str) -> Any:
 
         image_path = os.path.join(image_dir, image_name)
         if not os.path.exists(image_path):
-            return jsonify({"error": "图片不存在"}), 404
+            # 历史记录没有新图时的回退: 未遮挡裁剪→遮挡裁剪, 带框图→原尾部裁剪
+            fallback = {
+                "vehicle1_unmasked.jpg": "vehicle1.jpg",
+                "vehicle2_unmasked.jpg": "vehicle2.jpg",
+                "tail_view_crop3_boxed.jpg": "tail_view_crop3.jpg",
+                "tail_view_crop4_boxed.jpg": "tail_view_crop4.jpg",
+            }.get(image_name)
+            if fallback:
+                image_path = os.path.join(image_dir, fallback)
+            if not os.path.exists(image_path):
+                return jsonify({"error": "图片不存在"}), 404
 
         return send_file(image_path, mimetype="image/jpeg")
     except Exception as e:
@@ -4687,29 +5247,39 @@ def review_stats_page() -> Any:
     return render_template("review_stats.html")
 
 
+@app.get("/dataset")
+def dataset_page() -> Any:
+    """评估数据集管理页面"""
+    return render_template("dataset.html")
+
+
 @app.get("/thresholds")
 def get_thresholds() -> Any:
     return jsonify({
         "head_threshold": _HEAD_THRESHOLD,
         "tail_threshold": _TAIL_THRESHOLD,
+        "tail_char_threshold": _TAIL_CHAR_THRESHOLD,
     })
 
 
 @app.post("/thresholds")
 def set_thresholds() -> Any:
-    global _HEAD_THRESHOLD, _TAIL_THRESHOLD
+    global _HEAD_THRESHOLD, _TAIL_THRESHOLD, _TAIL_CHAR_THRESHOLD
 
     try:
         payload = request.get_json(silent=True) or {}
         head_threshold = payload.get("head_threshold", _HEAD_THRESHOLD)
         tail_threshold = payload.get("tail_threshold", _TAIL_THRESHOLD)
+        tail_char_threshold = payload.get("tail_char_threshold", _TAIL_CHAR_THRESHOLD)
 
         new_head_threshold = _validate_threshold_value("head_threshold", head_threshold)
         new_tail_threshold = _validate_threshold_value("tail_threshold", tail_threshold)
+        new_tail_char_threshold = _validate_threshold_value("tail_char_threshold", tail_char_threshold)
 
         with _THRESHOLD_LOCK:
             _HEAD_THRESHOLD = new_head_threshold
             _TAIL_THRESHOLD = new_tail_threshold
+            _TAIL_CHAR_THRESHOLD = new_tail_char_threshold
             _save_threshold_settings()
 
         return jsonify({
@@ -4717,6 +5287,7 @@ def set_thresholds() -> Any:
             "message": "thresholds updated",
             "head_threshold": _HEAD_THRESHOLD,
             "tail_threshold": _TAIL_THRESHOLD,
+            "tail_char_threshold": _TAIL_CHAR_THRESHOLD,
         })
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -4724,7 +5295,1064 @@ def set_thresholds() -> Any:
         return jsonify({"ok": False, "error": f"failed to update thresholds: {e}"}), 500
 
 
+@app.post("/api/build_category_dataset")
+def api_build_category_dataset() -> Any:
+    """构造单个类别数据集"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        exports_path = payload.get("exports_path")
+        dataset_path = payload.get("dataset_path")
+        category = payload.get("category")
+        
+        if not exports_path or not dataset_path or not category:
+            return jsonify({"ok": False, "error": "exports_path, dataset_path and category are required"}), 400
+        
+        if category not in ["normal", "fake_plate", "change_trailer"]:
+            return jsonify({"ok": False, "error": "Invalid category"}), 400
+        
+        # 导入build_dataset模块
+        import sys
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        
+        import build_dataset
+        
+        # 更新配置
+        build_dataset.EXPORTS_DIR = exports_path
+        build_dataset.DATASET_BASE_DIR = dataset_path
+        
+        # 执行单个类别构建
+        build_dataset.build_single_category_dataset(category)
+        
+        return jsonify({"ok": True, "message": f"{category} dataset built successfully"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to build category dataset: {e}"}), 500
+
+
+@app.post("/api/build_all_category_datasets")
+def api_build_all_category_datasets() -> Any:
+    """构造所有类别数据集"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        exports_path = payload.get("exports_path")
+        dataset_path = payload.get("dataset_path")
+        
+        if not exports_path or not dataset_path:
+            return jsonify({"ok": False, "error": "exports_path and dataset_path are required"}), 400
+        
+        # 导入build_dataset模块
+        import sys
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        
+        import build_dataset
+        
+        # 更新配置
+        build_dataset.EXPORTS_DIR = exports_path
+        build_dataset.DATASET_BASE_DIR = dataset_path
+        
+        # 执行所有类别构建
+        stats = build_dataset.build_all_category_datasets()
+        
+        return jsonify({"ok": True, "message": "All category datasets built successfully", "stats": stats})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to build all category datasets: {e}"}), 500
+
+
+@app.post("/api/build_eval_dataset")
+def api_build_eval_dataset() -> Any:
+    """构造评估数据集"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        exports_path = payload.get("exports_path")
+        dataset_path = payload.get("dataset_path")
+        total_samples = payload.get("total_samples", 500)
+        distribution = payload.get("distribution", {})
+        
+        if not exports_path or not dataset_path:
+            return jsonify({"ok": False, "error": "exports_path and dataset_path are required"}), 400
+        
+        # 导入build_dataset模块
+        import sys
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        
+        import build_dataset
+        
+        # 更新配置
+        build_dataset.EXPORTS_DIR = exports_path
+        build_dataset.DATASET_BASE_DIR = dataset_path
+        build_dataset.EVAL_TOTAL = total_samples
+        build_dataset.EVAL_DISTRIBUTION = distribution
+        
+        # 执行评估数据集构建
+        build_dataset.build_eval_dataset_only()
+        
+        # 获取评估数据集统计
+        from pathlib import Path
+        eval_dir = Path(dataset_path) / "eval_dataset"
+        samples_dir = eval_dir / "samples"
+        stats = {"total": 0, "normal": 0, "fake_plate": 0, "change_trailer": 0}
+        
+        if samples_dir.exists():
+            dataset_json_path = eval_dir / "dataset.json"
+            if dataset_json_path.exists():
+                with open(dataset_json_path, "r", encoding="utf-8") as f:
+                    dataset_json = json.load(f)
+                stats["total"] = dataset_json.get("total_samples", 0)
+                stats["normal"] = dataset_json.get("distribution", {}).get("normal", 0)
+                stats["fake_plate"] = dataset_json.get("distribution", {}).get("fake_plate", 0)
+                stats["change_trailer"] = dataset_json.get("distribution", {}).get("change_trailer", 0)
+        
+        return jsonify({"ok": True, "message": "Evaluation dataset built successfully", "stats": stats})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to build eval dataset: {e}"}), 500
+
+
+def _resolve_eval_dir(user_path: str) -> str:
+    """兼容两种输入: 完整 eval_dataset 路径 或 旧 base_dir(其下含 eval_dataset/)."""
+    p = str(user_path or EVAL_DATASET_DIR).rstrip("\\/")
+    if os.path.isfile(os.path.join(p, "dataset.json")):
+        return p
+    if os.path.isfile(os.path.join(p, "eval_dataset", "dataset.json")):
+        return os.path.join(p, "eval_dataset")
+    return p
+
+
+def _get_eval_dataset_distribution(eval_dir: str) -> Dict[str, Any]:
+    """扫描 eval_dir/samples 下各样本 meta.json 的真值分布（总样本/正常/套牌/换挂）"""
+    dist: Dict[str, Any] = {"total": 0, "normal": 0, "fake_plate": 0, "change_trailer": 0}
+    samples_root = os.path.join(eval_dir, "samples")
+    if not os.path.isdir(samples_root):
+        return dist
+    for name in sorted(os.listdir(samples_root)):
+        meta_path = os.path.join(samples_root, name, "meta.json")
+        if not os.path.isfile(meta_path):
+            continue
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            case_type = (meta.get("ground_truth") or {}).get("case_type")
+        except Exception:
+            case_type = None
+        dist["total"] += 1
+        if case_type in dist:
+            dist[case_type] += 1
+    return dist
+
+
+@app.get("/api/dataset_stats")
+def api_dataset_stats() -> Any:
+    """获取数据集统计信息"""
+    try:
+        # 从查询参数获取路径，如果没有则使用默认值
+        dataset_base_dir = request.args.get("dataset_path", EVAL_DATASET_DIR)
+        stats = {
+            "normal": 0,
+            "fake_plate": 0,
+            "change_trailer": 0,
+            "eval": 0
+        }
+
+        # 统计各类别数据集 (旧 base_dir 布局兼容: base/normal|fake_plate|change_trailer)
+        categories = ["normal", "fake_plate", "change_trailer"]
+        for category in categories:
+            category_dir = os.path.join(dataset_base_dir, category)
+            if os.path.exists(category_dir):
+                # 统计sample_xxxx目录数量
+                count = 0
+                for item in os.listdir(category_dir):
+                    item_path = os.path.join(category_dir, item)
+                    if os.path.isdir(item_path) and item.startswith("sample_"):
+                        count += 1
+                stats[category] = count
+
+        # 统计评估数据集 (兼容完整 eval_dataset 路径 或 旧 base_dir)
+        eval_dir = _resolve_eval_dir(dataset_base_dir)
+        if os.path.exists(eval_dir):
+            samples_dir = os.path.join(eval_dir, "samples")
+            if os.path.exists(samples_dir):
+                # 统计sample_xxxx目录数量
+                count = 0
+                for item in os.listdir(samples_dir):
+                    item_path = os.path.join(samples_dir, item)
+                    if os.path.isdir(item_path) and item.startswith("sample_"):
+                        count += 1
+                stats["eval"] = count
+
+        eval_dist = _get_eval_dataset_distribution(eval_dir)
+        return jsonify({"ok": True, "stats": stats, "eval_distribution": eval_dist})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"failed to get stats: {e}"}), 500
+
+
+# ==================== 数据集相关常量 ====================
+
+EVAL_DATASET_DIR = r"D:\test_dataset\eval_dataset"
+EVAL_RESULTS_DIR = r"D:\test_dataset\eval_results"
+EVAL_CATEGORIES = ["normal", "fake_plate", "change_trailer"]
+
+
+# ==================== 评估运行 ====================
+
+def _update_eval_state(**kw: Any) -> None:
+    with _EVAL_STATE_LOCK:
+        for k, v in kw.items():
+            _EVAL_STATE[k] = v
+
+
+def _load_eval_dataset(eval_dir: str) -> Optional[Dict[str, Any]]:
+    """读取 eval_dir/dataset.json"""
+    dataset_json_path = os.path.join(eval_dir, "dataset.json")
+    if not os.path.exists(dataset_json_path):
+        return None
+    with open(dataset_json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_sample_meta(sample_dir: str) -> Dict[str, Any]:
+    meta_path = os.path.join(sample_dir, "meta.json")
+    if not os.path.exists(meta_path):
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _post_predict(base_url: str, payload: Dict[str, Any], timeout: int = 600) -> Tuple[int, Dict[str, Any]]:
+    """自调用 /predict，优先用请求方的 host，失败后回退本机回环地址"""
+    candidates = [base_url.rstrip("/") + "/predict"]
+    try:
+        u = urllib.parse.urlsplit(base_url)
+        port = u.port or (443 if u.scheme == "https" else 80)
+        alt = f"{u.scheme}://127.0.0.1:{port}/predict"
+        if alt not in candidates:
+            candidates.append(alt)
+    except Exception:
+        pass
+
+    last_err: Optional[Exception] = None
+    for url in candidates:
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            return resp.status_code, data
+        except Exception as e:
+            last_err = e
+    return -1, {"ok": False, "error": f"request failed: {last_err}"}
+
+
+def _map_char_verdict(verdict: Optional[str]) -> Optional[str]:
+    """字符检测判定 → EVAL_CATEGORIES 口径.
+    "一致"→normal, "不一致"→change_trailer, 无法判断/作废→None (未参与字符判定)."""
+    if verdict == "一致":
+        return "normal"
+    if verdict == "不一致":
+        return "change_trailer"
+    return None
+
+
+def _compute_eval_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """双口径指标：正确率 / 误报率 / 漏检率（二分类聚合口径）
+
+    - 误报率 = 正常被判异常(套牌/换挂) / 正常样本总数
+    - 漏检率 = 异常被判正常 / 异常样本总数
+    stage1 口径用度量学习初判(stage1_case_type)，final 口径用 AI 终判(case_type)
+    char_compare 口径：仅统计字符检测做出判定(一致/不一致)的样本，衡量字符检测本身准确度
+    """
+    def _calc(pred_key: str) -> Dict[str, Any]:
+        total = len(results)
+        correct = 0
+        normal_total = 0
+        normal_wrong = 0
+        abnormal_total = 0
+        abnormal_missed = 0
+        for r in results:
+            gt = r.get("ground_truth")
+            pred = r.get(pred_key)
+            if not gt:
+                continue
+            if pred == gt:
+                correct += 1
+            if gt == "normal":
+                normal_total += 1
+                if pred != "normal":
+                    normal_wrong += 1
+            else:
+                abnormal_total += 1
+                if pred == "normal":
+                    abnormal_missed += 1
+        return {
+            "accuracy": round(correct / total, 4) if total else None,
+            "fpr": round(normal_wrong / normal_total, 4) if normal_total else None,
+            "fnr": round(abnormal_missed / abnormal_total, 4) if abnormal_total else None,
+        }
+
+    def _calc_char_compare() -> Dict[str, Any]:
+        decided = []          # (gt, mapped_pred) 仅字符检测有明确结论的样本
+        decided_count = 0
+        undecided_count = 0
+        for r in results:
+            gt = r.get("ground_truth")
+            verdict = r.get("char_compare_verdict")
+            mapped = _map_char_verdict(verdict)
+            if not gt:
+                continue
+            if mapped is None:
+                undecided_count += 1
+                continue
+            decided_count += 1
+            decided.append((gt, mapped))
+        total_decided = len(decided)
+        correct = sum(1 for gt, pred in decided if pred == gt)
+        normal_total = sum(1 for gt, _ in decided if gt == "normal")
+        normal_wrong = sum(1 for gt, pred in decided if gt == "normal" and pred != "normal")
+        abnormal_total = sum(1 for gt, _ in decided if gt != "normal")
+        abnormal_missed = sum(1 for gt, pred in decided if gt != "normal" and pred == "normal")
+        return {
+            "accuracy": round(correct / total_decided, 4) if total_decided else None,
+            "fpr": round(normal_wrong / normal_total, 4) if normal_total else None,
+            "fnr": round(abnormal_missed / abnormal_total, 4) if abnormal_total else None,
+            "decided": decided_count,
+            "undecided": undecided_count,
+            "coverage": round(decided_count / (decided_count + undecided_count), 4)
+            if (decided_count + undecided_count) else None,
+        }
+
+    return {
+        "stage1": _calc("stage1_case_type"),
+        "final": _calc("case_type"),
+        "char_compare": _calc_char_compare(),
+    }
+
+
+def _scan_threshold_grid(
+        results: List[Dict[str, Any]],
+        head_threshold: float,
+        tail_ths: List[float],
+        tail_char_ths: List[float],
+        recorded_tail_threshold: Optional[float] = None,
+        recorded_tail_char_threshold: Optional[float] = None,
+) -> Dict[str, Any]:
+    """阈值网格扫描：用已记录 head_prob/tail_prob/char_compare_verdict 模拟不同阈值组合下的判定.
+
+    额外输出每组合的 ai_count（进入AI复核的样本数）与 est_avg_s（估算平均耗时）：
+      耗时基线用记录结果里 lat_ms 中位数分组（AI复核组 / 非AI组），
+      参考点默认取 (tail_ths 末位, tail_char_ths 首位)，也可用 recorded_tail_threshold/
+      recorded_tail_char_threshold 显式指定记录运行的实际阈值。
+      AI组 = proxy_agree_low_sim / proxy_undetermined / proxy_no_prob；
+      proxy_head 计入非AI（head AI 成本对所有 tail_th 恒定，比较时抵消）。
+
+    模拟规则 (与 _classify_with_ai_second_judge_internal 的字符检测优先逻辑对齐):
+      - head_prob < head_threshold                       → 用记录终判作代理 (head AI 结果未记录,
+                                                            线上 head AI 可把低相似度清成 normal)
+      - head_prob>=head_th 且 tail_prob>tail_th          → normal (直接通过, 不触发复核)
+      - 进入尾部复核 (tail_prob<=tail_th):
+          * 字符一致 且 tail_prob>tail_char_th           → normal (char_normal)
+          * 字符不一致                                    → change_trailer (char_change)
+          * 字符一致但相似度不足 / 字符无法判断 / 字符未运行 → 用记录终判作代理 (proxy_*)
+      - head/tail 概率缺失                               → 用记录终判作代理
+
+    注: 因 tail_ths 上限 0.98 >= 记录运行阈值, 需用字符证据的样本(tail_prob<=tail_th)
+        在记录运行时同样被标记复核, char_compare_verdict 一定存在, 证据无缺口.
+    指标口径与 _calc 一致: accuracy / fpr(正常判异常) / fnr(异常判正常).
+    """
+
+    def _simulate(r: Dict[str, Any], tail_th: float, tail_char_th: float) -> Tuple[str, str]:
+        head_prob = r.get("head_prob")
+        tail_prob = r.get("tail_prob")
+        if head_prob is None or tail_prob is None:
+            return r.get("case_type") or "abnormal", "proxy_no_prob"
+        if head_prob < head_threshold:
+            return r.get("case_type") or "abnormal", "proxy_head"
+        if tail_prob > tail_th:
+            return "normal", "direct_normal"
+        if r.get("char_compare_used"):
+            mapped = _map_char_verdict(r.get("char_compare_verdict"))
+            if mapped == "normal":
+                if tail_prob > tail_char_th:
+                    return "normal", "char_normal"
+                return r.get("case_type") or "abnormal", "proxy_agree_low_sim"
+            if mapped == "change_trailer":
+                return "change_trailer", "char_change"
+        return r.get("case_type") or "abnormal", "proxy_undetermined"
+
+    def _median(values: List[float]) -> Optional[float]:
+        if not values:
+            return None
+        s = sorted(values)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+    # 耗时基线：用记录阈值把样本分成 AI复核 / 非AI 两组，取中位耗时
+    AI_SOURCES = {"proxy_agree_low_sim", "proxy_undetermined", "proxy_no_prob"}
+    ref_tail = recorded_tail_threshold if recorded_tail_threshold is not None else (tail_ths[-1] if tail_ths else 0.98)
+    ref_char = recorded_tail_char_threshold if recorded_tail_char_threshold is not None else (tail_char_ths[0] if tail_char_ths else 0.85)
+    ai_lats: List[float] = []
+    fast_lats: List[float] = []
+    for r in results:
+        if r.get("lat_ms") is None:
+            continue
+        src = _simulate(r, ref_tail, ref_char)[1]
+        if src in AI_SOURCES:
+            ai_lats.append(float(r["lat_ms"]))
+        else:
+            fast_lats.append(float(r["lat_ms"]))
+    ai_est = _median(ai_lats) / 1000.0 if ai_lats else None
+    fast_est = _median(fast_lats) / 1000.0 if fast_lats else None
+
+    def _metrics(tail_th: float, tail_char_th: float) -> Dict[str, Any]:
+        correct = 0
+        total = 0
+        normal_total = 0
+        normal_wrong = 0
+        abnormal_total = 0
+        abnormal_missed = 0
+        src_counts: Dict[str, int] = {}
+        for r in results:
+            gt = r.get("ground_truth")
+            if not gt:
+                continue
+            pred, src = _simulate(r, tail_th, tail_char_th)
+            src_counts[src] = src_counts.get(src, 0) + 1
+            total += 1
+            if pred == gt:
+                correct += 1
+            if gt == "normal":
+                normal_total += 1
+                if pred != "normal":
+                    normal_wrong += 1
+            else:
+                abnormal_total += 1
+                if pred == "normal":
+                    abnormal_missed += 1
+        ai_count = sum(src_counts.get(s, 0) for s in AI_SOURCES)
+        est_avg_s = None
+        if ai_est is not None and fast_est is not None and total:
+            est_avg_s = round((ai_count * ai_est + (total - ai_count) * fast_est) / total, 2)
+        return {
+            "tail_threshold": tail_th,
+            "tail_char_threshold": tail_char_th,
+            "accuracy": round(correct / total, 4) if total else None,
+            "correct": correct,
+            "total": total,
+            "fpr": round(normal_wrong / normal_total, 4) if normal_total else None,
+            "normal_total": normal_total,
+            "normal_wrong": normal_wrong,
+            "fnr": round(abnormal_missed / abnormal_total, 4) if abnormal_total else None,
+            "abnormal_total": abnormal_total,
+            "abnormal_missed": abnormal_missed,
+            "ai_count": ai_count,
+            "est_avg_s": est_avg_s,
+            "lat_ai_median_s": ai_est,
+            "lat_fast_median_s": fast_est,
+            "source_counts": src_counts,
+        }
+
+    grid = [_metrics(th, cth) for th in tail_ths for cth in tail_char_ths]
+    return {"head_threshold": head_threshold, "grid": grid}
+
+
+def _pick_best_threshold_combo(
+        grid: List[Dict[str, Any]],
+        max_fnr: float,
+        prefer: str = "fpr",
+) -> Dict[str, Any]:
+    """从扫描网格中选最优组合.
+
+    prefer="fpr" (计划默认): 在 fnr<=max_fnr 的组合里选 fpr 最低;
+    平分时取 accuracy 更高, 再取 tail_threshold 更低(减少AI复核).
+    prefer="accuracy": 忽略 fnr 约束, 取 accuracy 最高.
+    无满足条件组合时返回 None.
+    """
+    candidates = [c for c in grid if c.get("fnr") is not None and c["fnr"] <= max_fnr]
+    if not candidates:
+        return None
+    if prefer == "accuracy":
+        return max(
+            candidates,
+            key=lambda c: (
+                c["accuracy"] if c.get("accuracy") is not None else -1,
+                -c["fpr"] if c.get("fpr") is not None else 1e9,
+                -c["tail_threshold"],
+            ),
+        )
+    return min(
+        candidates,
+        key=lambda c: (
+            c["fpr"] if c.get("fpr") is not None else 1e9,
+            -(c["accuracy"] if c.get("accuracy") is not None else -1),
+            c["tail_threshold"],
+        ),
+    )
+
+
+def _build_eval_summary(results: List[Dict[str, Any]], head_threshold: float, tail_threshold: float, dataset_path: str, run_id: Optional[str] = None) -> Dict[str, Any]:
+    """汇总：总览 + 每类准确率 + 混淆矩阵 + 双口径指标 + 平均耗时"""
+    total = len(results)
+    ok_count = sum(1 for r in results if r.get("ok"))
+    hit_count = sum(1 for r in results if r.get("hit"))
+    stage1_hit_count = sum(1 for r in results if r.get("hit_stage1"))
+
+    lat_values = [float(r["lat_ms"]) for r in results if r.get("lat_ms") is not None]
+    avg_lat_ms = round(sum(lat_values) / len(lat_values), 1) if lat_values else None
+
+    confusion: Dict[str, Dict[str, int]] = {
+        gt: {pred: 0 for pred in EVAL_CATEGORIES}
+        for gt in EVAL_CATEGORIES
+    }
+    per_category: Dict[str, Dict[str, Any]] = {}
+
+    for gt in EVAL_CATEGORIES:
+        gt_results = [r for r in results if r.get("ground_truth") == gt]
+        hits = sum(1 for r in gt_results if r.get("hit"))
+        stage1_hits = sum(1 for r in gt_results if r.get("hit_stage1"))
+        per_category[gt] = {
+            "count": len(gt_results),
+            "hit": hits,
+            "hit_stage1": stage1_hits,
+            "accuracy": round(hits / len(gt_results), 4) if gt_results else None,
+            "stage1_accuracy": round(stage1_hits / len(gt_results), 4) if gt_results else None,
+        }
+        for r in gt_results:
+            pred = r.get("case_type")
+            if pred in confusion[gt]:
+                confusion[gt][pred] += 1
+
+    return {
+        "run_id": run_id,
+        "dataset_path": dataset_path,
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "head_threshold": head_threshold,
+        "tail_threshold": tail_threshold,
+        "total": total,
+        "ok": ok_count,
+        "abnormal": total - ok_count,
+        "hit": hit_count,
+        "hit_stage1": stage1_hit_count,
+        "overall_accuracy": round(hit_count / total, 4) if total else None,
+        "stage1_accuracy": round(stage1_hit_count / total, 4) if total else None,
+        "avg_lat_ms": avg_lat_ms,
+        "metrics": _compute_eval_metrics(results),
+        "per_category": per_category,
+        "confusion_matrix": confusion,
+        "results": results,
+    }
+
+
+def _run_evaluation_background(eval_dir: str, results_path: str, base_url: str) -> None:
+    """后台执行评估：逐组调用 /predict，把结果写入 runs/{run_id}/ 多轮目录"""
+    errors: List[Dict[str, Any]] = []
+    try:
+        _update_eval_state(
+            running=True, total=0, processed=0, success=0, failed=0,
+            current_index=0, current_sample="", message="开始加载评估数据集...",
+            errors=[], results=[], started_at=datetime.datetime.now().isoformat(timespec="seconds"),
+            finished_at=None, run_id=None,
+        )
+
+        dataset = _load_eval_dataset(eval_dir)
+        if not dataset:
+            _update_eval_state(
+                running=False, message="未找到 dataset.json",
+                finished_at=datetime.datetime.now().isoformat(timespec="seconds"),
+            )
+            return
+
+        samples = dataset.get("samples", [])
+        total = len(samples)
+        if total == 0:
+            _update_eval_state(
+                running=False, message="评估数据集为空",
+                finished_at=datetime.datetime.now().isoformat(timespec="seconds"),
+            )
+            return
+
+        # 随机打乱评估顺序（不重复），避免每次按固定顺序读取
+        random.shuffle(samples)
+
+        results_path = os.path.abspath(results_path)
+        os.makedirs(results_path, exist_ok=True)
+
+        head_threshold = _HEAD_THRESHOLD
+        tail_threshold = _TAIL_THRESHOLD
+
+        # 本轮 run 目录
+        run_id = "run_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        runs_dir = _get_eval_runs_dir(results_path)
+        run_dir = os.path.join(runs_dir, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+        _update_eval_state(run_id=run_id, message=f"共 {total} 组，开始评估...")
+
+        done_results: List[Dict[str, Any]] = []
+        success_count = 0
+        failed_count = 0
+
+        _update_eval_state(total=total)
+
+        for idx, sample in enumerate(samples):
+            sample_id = sample.get("sample_id", f"sample_{idx + 1:04d}")
+            _update_eval_state(
+                current_index=idx + 1, current_sample=sample_id, processed=idx + 1,
+                success=success_count, failed=failed_count,
+                message=f"正在评估 {sample_id} ({idx + 1}/{total})...",
+            )
+
+            sample_dir = os.path.join(eval_dir, "samples", sample_id)
+            sample_meta = _load_sample_meta(sample_dir)
+            image_paths = sample_meta.get("image_paths", {})
+            ground_truth = sample_meta.get("ground_truth", {})
+
+            # 相对路径转绝对路径，仅传存在的图
+            payload: Dict[str, str] = {}
+            for key in ("path1", "path2", "path3", "path4"):
+                rel = image_paths.get(key)
+                if rel:
+                    abs_path = os.path.join(sample_dir, rel)
+                    if os.path.isfile(abs_path):
+                        payload[key] = abs_path
+
+            if not payload.get("path1") or not payload.get("path2"):
+                entry = {
+                    "sample_id": sample_id,
+                    "ok": False,
+                    "case_type": "abnormal",
+                    "ground_truth": ground_truth.get("case_type"),
+                    "error": "样本主图缺失",
+                    "hit": False,
+                    "hit_stage1": False,
+                    "stage1_case_type": None,
+                    "lat_ms": None,
+                    "record_id": None,
+                }
+                done_results.append(entry)
+                failed_count += 1
+                errors.append({"sample_id": sample_id, "error": "样本主图缺失"})
+                continue
+
+            status_code, resp_data = _post_predict(base_url, payload)
+
+            record_id = resp_data.get("record_id")
+            prediction = resp_data.get("case_type")
+            is_ok = bool(resp_data.get("ok"))
+            head_prob = resp_data.get("head_prob")
+            tail_prob = resp_data.get("tail_prob")
+            gt_type = ground_truth.get("case_type")
+            hit = bool(gt_type) and is_ok and prediction == gt_type
+
+            # 度量学习初判（用运行时刻阈值重算，保证两口径一致）
+            stage1_type = _classify_with_thresholds(head_prob, tail_prob, head_threshold, tail_threshold)
+            hit_stage1 = bool(gt_type) and is_ok and stage1_type == gt_type
+
+            entry = {
+                "sample_id": sample_id,
+                "ok": is_ok,
+                "case_type": prediction,
+                "stage1_case_type": stage1_type,
+                "head_prob": head_prob,
+                "tail_prob": tail_prob,
+                "record_id": record_id,
+                "hit": hit,
+                "hit_stage1": hit_stage1,
+                "ground_truth": gt_type,
+                "input_mode": resp_data.get("input_mode"),
+                "http_status": status_code,
+                "lat_ms": resp_data.get("lat_ms"),
+                "error": resp_data.get("error"),
+                "diff_desc": resp_data.get("final_diff_summary") or resp_data.get("diff_desc"),
+                "char_compare_used": resp_data.get("char_compare_used", False),
+                "char_compare_verdict": resp_data.get("char_compare_verdict"),
+                "char_compare_plate_type": resp_data.get("char_compare_plate_type"),
+                "char_compare_R": resp_data.get("char_compare_R"),
+                "char_compare_M": resp_data.get("char_compare_M"),
+                "char_compare_U": resp_data.get("char_compare_U"),
+                "char_compare_p3_seq": resp_data.get("char_compare_p3_seq"),
+                "char_compare_p4_seq": resp_data.get("char_compare_p4_seq"),
+                "timing_ms": resp_data.get("timing_ms"),
+            }
+            done_results.append(entry)
+
+            if is_ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                if resp_data.get("error"):
+                    errors.append({"sample_id": sample_id, "error": resp_data.get("error")})
+
+            # 写入本轮样本目录
+            sample_result_dir = os.path.join(run_dir, "samples", sample_id)
+            os.makedirs(sample_result_dir, exist_ok=True)
+
+            with open(os.path.join(sample_result_dir, "eval_result.json"), "w", encoding="utf-8") as f:
+                json.dump(entry, f, ensure_ascii=False, indent=2)
+
+            # 运行记录 meta.json（合并样本信息）
+            run_meta: Dict[str, Any] = {}
+            if record_id:
+                rec = _METRICS.get_record(record_id)
+                if rec:
+                    run_meta = dict(rec)
+            run_meta["sample_id"] = sample_id
+            run_meta["ground_truth"] = ground_truth
+            run_meta["hit"] = hit
+            run_meta["hit_stage1"] = hit_stage1
+            run_meta["stage1_case_type"] = stage1_type
+            run_meta["eval_run_id"] = run_id
+            run_meta["eval_run_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            with open(os.path.join(sample_result_dir, "meta.json"), "w", encoding="utf-8") as f:
+                json.dump(run_meta, f, ensure_ascii=False, indent=2)
+
+        # 汇总（新格式：含双口径指标 + 平均耗时）
+        summary = _build_eval_summary(done_results, head_threshold, tail_threshold, eval_dir, run_id=run_id)
+        with open(os.path.join(run_dir, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(run_dir, "results.json"), "w", encoding="utf-8") as f:
+            json.dump(done_results, f, ensure_ascii=False, indent=2)
+
+        _update_eval_state(
+            running=False, success=success_count, failed=failed_count,
+            processed=total, message="评估完成", errors=errors, results=done_results,
+            finished_at=datetime.datetime.now().isoformat(timespec="seconds"),
+            metrics=summary.get("metrics"),
+            avg_lat_ms=summary.get("avg_lat_ms"),
+            per_category=summary.get("per_category"),
+        )
+        _cleanup_old_eval_runs(results_path)
+        print(f"[eval] {run_id} 评估完成，共 {total} 组，命中 {len([r for r in done_results if r.get('hit')])} 组，结果写入 {run_dir}", flush=True)
+    except Exception as e:
+        errors.append({"error": str(e)})
+        _update_eval_state(
+            running=False, message=f"评估异常: {e}", errors=errors,
+            finished_at=datetime.datetime.now().isoformat(timespec="seconds"),
+        )
+        print(f"[eval] evaluation failed: {e}", flush=True)
+
+
+def _get_eval_runs_dir(results_path: str) -> str:
+    return os.path.join(results_path, "runs")
+
+
+def _list_eval_runs(results_path: str) -> List[Dict[str, Any]]:
+    """列出该结果目录下的所有评估运行（读各 run 的 summary.json）"""
+    results_path = os.path.abspath(results_path)
+    _migrate_legacy_eval_runs(results_path)
+    runs_dir = _get_eval_runs_dir(results_path)
+    runs: List[Dict[str, Any]] = []
+    if os.path.isdir(runs_dir):
+        for name in os.listdir(runs_dir):
+            run_dir = os.path.join(runs_dir, name)
+            summary_path = os.path.join(run_dir, "summary.json")
+            if os.path.isdir(run_dir) and os.path.exists(summary_path):
+                try:
+                    with open(summary_path, "r", encoding="utf-8") as f:
+                        summary = json.load(f)
+                    summary["run_id"] = summary.get("run_id") or name
+                    runs.append(summary)
+                except Exception:
+                    continue
+    runs.sort(key=lambda x: x.get("run_id", ""), reverse=True)
+    return runs
+
+
+def _migrate_legacy_eval_runs(results_path: str) -> None:
+    """旧版平铺结果(eval_results/sample_*/ + summary.json)封装成一个 run 并删除"""
+    results_path = os.path.abspath(results_path)
+    summary_path = os.path.join(results_path, "summary.json")
+    if os.path.exists(_get_eval_runs_dir(results_path)) or not os.path.exists(summary_path):
+        return
+    try:
+        with open(summary_path, "r", encoding="utf-8") as f:
+            old = json.load(f)
+    except Exception:
+        return
+    old_results = old.get("results") or []
+    sample_dirs = [d for d in os.listdir(results_path)
+                   if os.path.isdir(os.path.join(results_path, d)) and d.startswith("sample_")]
+    if not old_results and not sample_dirs:
+        return
+
+    # run_id 由旧 summary 生成时间解析，失败则用文件 mtime
+    run_id = None
+    gen = old.get("generated_at") or ""
+    try:
+        dt = datetime.datetime.fromisoformat(gen.replace("Z", "+00:00"))
+        run_id = "run_" + dt.strftime("%Y%m%d_%H%M%S")
+    except Exception:
+        try:
+            dt = datetime.datetime.fromtimestamp(os.path.getmtime(summary_path))
+            run_id = "run_" + dt.strftime("%Y%m%d_%H%M%S")
+        except Exception:
+            run_id = "run_legacy"
+
+    run_dir = os.path.join(_get_eval_runs_dir(results_path), run_id)
+    os.makedirs(os.path.join(run_dir, "samples"), exist_ok=True)
+
+    head_threshold = float(old.get("head_threshold") or _DEFAULT_HEAD_THRESHOLD)
+    tail_threshold = float(old.get("tail_threshold") or _DEFAULT_TAIL_THRESHOLD)
+    migrated_results: List[Dict[str, Any]] = []
+    for r in old_results:
+        r = dict(r)
+        gt = r.get("ground_truth")
+        stage1 = _classify_with_thresholds(r.get("head_prob"), r.get("tail_prob"), head_threshold, tail_threshold)
+        r.setdefault("stage1_case_type", stage1)
+        r.setdefault("hit_stage1", bool(gt) and stage1 == gt)
+        r.setdefault("lat_ms", None)
+        r.setdefault("hit", bool(r.get("hit")))
+        migrated_results.append(r)
+        # 旧 sample 目录里的 eval_result.json / meta.json 原样搬入
+        sid = r.get("sample_id")
+        if sid:
+            old_sdir = os.path.join(results_path, sid)
+            new_sdir = os.path.join(run_dir, "samples", sid)
+            os.makedirs(new_sdir, exist_ok=True)
+            for fname in ("eval_result.json", "meta.json"):
+                src = os.path.join(old_sdir, fname)
+                dst = os.path.join(new_sdir, fname)
+                if os.path.exists(src):
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
+
+    summary = _build_eval_summary(migrated_results, head_threshold, tail_threshold, old.get("dataset_path") or "", run_id=run_id)
+    with open(os.path.join(run_dir, "summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(run_dir, "results.json"), "w", encoding="utf-8") as f:
+        json.dump(migrated_results, f, ensure_ascii=False, indent=2)
+
+    # 删除旧平铺目录与旧 summary.json
+    for d in sample_dirs:
+        shutil.rmtree(os.path.join(results_path, d), ignore_errors=True)
+    try:
+        os.remove(summary_path)
+    except Exception:
+        pass
+    print(f"[eval] 已迁移旧版平铺结果到 {run_id}", flush=True)
+
+
+def _cleanup_old_eval_runs(results_path: str, days: int = 30) -> int:
+    """删除早于 days 天的评估运行目录，返回删除数量"""
+    results_path = os.path.abspath(results_path)
+    runs_dir = _get_eval_runs_dir(results_path)
+    if not os.path.isdir(runs_dir):
+        return 0
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    removed = 0
+    for name in os.listdir(runs_dir):
+        run_dir = os.path.join(runs_dir, name)
+        if not os.path.isdir(run_dir):
+            continue
+        dt = None
+        ts = name[len("run_"):] if name.startswith("run_") else name
+        try:
+            dt = datetime.datetime.strptime(ts, "%Y%m%d_%H%M%S")
+        except Exception:
+            try:
+                dt = datetime.datetime.fromtimestamp(os.path.getmtime(run_dir))
+            except Exception:
+                dt = None
+        if dt is not None and dt < cutoff:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            removed += 1
+    if removed:
+        print(f"[eval] 自动清理 {removed} 个超过 {days} 天的评估运行", flush=True)
+    return removed
+
+
+@app.get("/api/eval/runs")
+def api_eval_runs() -> Any:
+    """列出评估运行记录（对比表数据）"""
+    try:
+        results_path = request.args.get("results_path") or EVAL_RESULTS_DIR
+        return jsonify({"ok": True, "results_path": os.path.abspath(results_path), "runs": _list_eval_runs(results_path)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.get("/api/eval/runs/<run_id>")
+def api_eval_run_detail(run_id: str) -> Any:
+    """单个评估运行详情（summary + results）"""
+    try:
+        results_path = request.args.get("results_path") or EVAL_RESULTS_DIR
+        run_dir = os.path.join(_get_eval_runs_dir(os.path.abspath(results_path)), run_id)
+        summary_path = os.path.join(run_dir, "summary.json")
+        if not os.path.isdir(run_dir) or not os.path.exists(summary_path):
+            return jsonify({"ok": False, "error": "评估运行不存在"}), 404
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        results_path_ = os.path.join(run_dir, "results.json")
+        if os.path.exists(results_path_):
+            with open(results_path_, "r", encoding="utf-8") as f:
+                summary["results"] = json.load(f)
+        return jsonify({"ok": True, "run": summary})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.post("/api/eval/threshold_scan")
+def api_eval_threshold_scan() -> Any:
+    """阈值网格扫描：对已完成评估 run 的 results.json 重新模拟判定, 输出准确率/误报率/漏检率表格.
+
+    body:
+      run_id: str           (必填) 目标评估运行
+      results_path: str     (可选) 结果根目录, 默认 EVAL_RESULTS_DIR
+      head_threshold: float (可选) 默认取 run summary 的 head_threshold
+      tail_ths: [float]     (可选) 尾部相似度阈值扫描集, 默认 [0.80..0.98]
+      tail_char_ths: [float](可选) 字符一致放行阈值扫描集, 默认 [0.70..0.95]
+      max_fnr: float        (可选) 选优时漏检率上限, 默认 0.10
+      prefer: str           (可选) "fpr"|"accuracy", 默认 "fpr"
+      recorded_tail_threshold / recorded_tail_char_threshold (可选):
+        耗时估算参考点(记录运行实际阈值), 默认取当前生效阈值
+    每网格行含 ai_count(进AI复核样本数) 与 est_avg_s(估算平均耗时,秒).
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        run_id = payload.get("run_id")
+        if not run_id:
+            return jsonify({"ok": False, "error": "缺少 run_id"}), 400
+        results_path = os.path.abspath(payload.get("results_path") or EVAL_RESULTS_DIR)
+        run_dir = os.path.join(_get_eval_runs_dir(results_path), run_id)
+        summary_path = os.path.join(run_dir, "summary.json")
+        results_path_ = os.path.join(run_dir, "results.json")
+        if not os.path.isdir(run_dir) or not os.path.exists(summary_path):
+            return jsonify({"ok": False, "error": "评估运行不存在"}), 404
+        if not os.path.exists(results_path_):
+            return jsonify({"ok": False, "error": "该运行无 results.json（无样本级记录）"}), 400
+
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        with open(results_path_, "r", encoding="utf-8") as f:
+            results = json.load(f)
+
+        head_threshold = float(payload.get("head_threshold") or summary.get("head_threshold") or _DEFAULT_HEAD_THRESHOLD)
+        tail_ths = [float(x) for x in (payload.get("tail_ths") or [0.80, 0.82, 0.85, 0.88, 0.90, 0.92, 0.95, 0.98])]
+        tail_char_ths = [float(x) for x in (payload.get("tail_char_ths") or [0.70, 0.75, 0.80, 0.85, 0.90, 0.95])]
+        max_fnr = float(payload.get("max_fnr") if payload.get("max_fnr") is not None else 0.10)
+        prefer = str(payload.get("prefer") or "fpr")
+        # 耗时估算的参考点：记录运行实际阈值，默认取当前生效阈值
+        recorded_tail = float(payload["recorded_tail_threshold"]) if payload.get("recorded_tail_threshold") is not None else _TAIL_THRESHOLD
+        recorded_char = float(payload["recorded_tail_char_threshold"]) if payload.get("recorded_tail_char_threshold") is not None else _TAIL_CHAR_THRESHOLD
+
+        scan = _scan_threshold_grid(results, head_threshold, tail_ths, tail_char_ths,
+                                    recorded_tail_threshold=recorded_tail,
+                                    recorded_tail_char_threshold=recorded_char)
+        grid = scan["grid"]
+        best_fpr = _pick_best_threshold_combo(grid, max_fnr, prefer="fpr")
+        best_accuracy = _pick_best_threshold_combo(grid, max_fnr, prefer="accuracy")
+        # 不受 fnr 约束的最优，始终给用户一个可参考候选
+        best_fpr_unconstrained = _pick_best_threshold_combo(grid, 1.0, prefer="fpr")
+        best_accuracy_unconstrained = _pick_best_threshold_combo(grid, 1.0, prefer="accuracy")
+
+        return jsonify({
+            "ok": True,
+            "run_id": run_id,
+            "sample_count": len(results),
+            "head_threshold": head_threshold,
+            "tail_ths": tail_ths,
+            "tail_char_ths": tail_char_ths,
+            "max_fnr": max_fnr,
+            "recorded_tail_threshold": recorded_tail,
+            "recorded_tail_char_threshold": recorded_char,
+            "grid": grid,
+            "best_fpr": best_fpr,
+            "best_accuracy": best_accuracy,
+            "best_fpr_unconstrained": best_fpr_unconstrained,
+            "best_accuracy_unconstrained": best_accuracy_unconstrained,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.delete("/api/eval/runs/<run_id>")
+def api_eval_run_delete(run_id: str) -> Any:
+    """删除一个评估运行记录"""
+    try:
+        results_path = request.args.get("results_path") or EVAL_RESULTS_DIR
+        run_dir = os.path.join(_get_eval_runs_dir(os.path.abspath(results_path)), run_id)
+        if not os.path.isdir(run_dir):
+            return jsonify({"ok": False, "error": "评估运行不存在"}), 404
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return jsonify({"ok": True, "message": f"已删除 {run_id}"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.post("/api/records/by_ids")
+def api_records_by_ids() -> Any:
+    """按 record_id 列表批量查询记录（用于评估页导出的 ID 回查）"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        record_ids = payload.get("record_ids", [])
+        if not isinstance(record_ids, list):
+            return jsonify({"ok": False, "error": "record_ids 必须是数组"}), 400
+        ids = [str(x).strip() for x in record_ids if str(x).strip()]
+        found: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        for rid in ids:
+            rec = _METRICS.get_record(rid)
+            if rec and not rec.get("deleted"):
+                found.append(rec)
+            else:
+                missing.append(rid)
+        return jsonify({"ok": True, "records": found, "total": len(found), "requested": len(ids), "missing": missing})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.post("/api/run_evaluation")
+def api_run_evaluation() -> Any:
+    """启动评估：后台逐组调用 /predict 并写入 eval_results"""
+    try:
+        payload = request.get_json(silent=True) or {}
+        eval_dir = _resolve_eval_dir(payload.get("dataset_path") or EVAL_DATASET_DIR)
+        results_path = str(payload.get("results_path") or EVAL_RESULTS_DIR).rstrip("\\/")
+
+        with _EVAL_STATE_LOCK:
+            if _EVAL_STATE.get("running"):
+                return jsonify({"ok": False, "error": "评估已在运行中"}), 409
+            _EVAL_STATE["running"] = True
+
+        base_url = request.host_url
+        threading.Thread(
+            target=_run_evaluation_background,
+            args=(eval_dir, results_path, base_url),
+            daemon=True,
+        ).start()
+        return jsonify({"ok": True, "message": "评估已开始"})
+    except Exception as e:
+        with _EVAL_STATE_LOCK:
+            _EVAL_STATE["running"] = False
+        return jsonify({"ok": False, "error": f"failed to start evaluation: {e}"}), 500
+
+
+@app.get("/api/eval_progress")
+def api_eval_progress() -> Any:
+    """获取评估进度"""
+    with _EVAL_STATE_LOCK:
+        state = dict(_EVAL_STATE)
+        state["errors"] = list(_EVAL_STATE["errors"])
+        state["results"] = list(_EVAL_STATE["results"])
+    return jsonify({"ok": True, "state": state})
+
+
 if __name__ == "__main__":
+    try:
+        _cleanup_old_eval_runs(EVAL_RESULTS_DIR)
+    except Exception as e:
+        print(f"[eval] 启动清理评估运行失败: {e}", flush=True)
+    # 启动前预热方案B字符检测, 避免首次请求等待模型加载
+    _warmup_char_reader()
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8001"))
     app.run(host=host, port=port, threaded=True)

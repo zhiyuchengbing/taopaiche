@@ -1311,3 +1311,120 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
   - 文件：`data_chuli/demo/demo/data_chuli/cropper.py`
   - 功能：车辆检测与裁切工具的副本，使用 YOLO 检测车辆并裁切最大目标，支持车牌打码功能
   - 说明：作为独立模块提供，便于其他模块复用车辆裁切预处理功能
+
+## 2026-08-06
+
+### 评估体系增强：多轮保留/对比、错误ID导出、双口径指标、数据集分布
+
+- **[新增] 评估结果多轮保留（runs 结构）**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：评估结果不再覆盖式写入顶层，改为写入 `eval_results/runs/run_YYYYMMDD_HHMMSS/`（summary.json + results.json + samples/），run_id 内嵌时间戳、天然排序；列出时直接扫描 runs 目录逐个读 summary.json，不引入索引文件，避免索引漂移
+  - 端点：`GET /api/eval/runs`、`GET /api/eval/runs/<run_id>`、`DELETE /api/eval/runs/<run_id>`（均支持 `results_path` 查询参数）
+  - 自动清理 30 天前旧 run（启动时 + 每轮评估完成后）；旧平铺结果启动时自动迁移进 runs 结构
+
+- **[新增] 错误 record-id 批量导出与批量回查**
+  - 文件：`my_predict_gui_new.py`、`templates/dataset.html`、`templates/records.html`
+  - 变更：评估页支持按命中结果筛选错误记录，导出错误 record-id（txt 下载 / 一键复制）；记录页新增 `POST /api/records/by_ids`，按 record-id 批量回查记录（返回 found/missing）
+
+- **[新增] 双口径指标（正确率/误报率/漏检率）+ 单样本耗时**
+  - 文件：`my_predict_gui_new.py`
+  - 口径：正确率＝预测正确样本数/总样本数；误报率＝真值正常但判异常/正常样本数；漏检率＝真值异常（套牌+换挂）但判正常/异常样本数
+  - 按度量学习初判（`stage1_case_type`，用运行阈值重算）与 AI 终判（`case_type`）两套口径分别统计，存 summary.json `metrics{stage1,final}`；`avg_lat_ms` 为单样本耗时均值（`/predict` 响应新增 `lat_ms`）
+  - 完成评估后实时写入 `_EVAL_STATE`（`metrics`/`avg_lat_ms`/`per_category`），评估页不点"查看"也能看到真实指标
+
+- **[新增] 数据集分布统计**
+  - 文件：`my_predict_gui_new.py`
+  - 变更：`GET /api/dataset_stats` 新增 `eval_distribution`（扫描 `eval_dataset/samples/*/meta.json` 的 ground_truth，得 total/normal/fake_plate/change_trailer）
+
+### 数据集管理页面布局（评估页）
+
+- 文件：`templates/dataset.html`
+- **[调整] 数据集分布展示**：开始评估按钮右侧显示当前测试数据集的总样本数/实际换挂数/实际套牌数（同排展示）；查看历史 run 记录时按该 run 的 `per_category` 覆盖显示，其他时候不显示
+- **[调整] 摘要卡片布局**：有效判定、命中、准确率、单次平均耗时四个卡片单行排列
+- **[调整] 指标表格结构**：移除"单次平均耗时"行；指标表格下方单行按顺序显示"轮次、命中结果筛选下拉框、复制错误ID、错误组数"
+- **[新增] 统计口径说明**：指标表格上方添加文字说明正确率/误报率/漏检率的统计口径
+
+### Ollama 本机直连修复（AI 二次判断）
+
+- 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`、`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai_shijiao2.py`
+- 变更：`ollama.chat(...)` 改为模块级 `ollama.Client(trust_env=False).chat(...)`，绕过 httpx 走系统代理（127.0.0.1:7897）导致的 502，并避免 httpx 默认超时掐断流式输出
+
+### 环境升级：适配 RTX 5060 Ti（sm_120）
+
+- **[升级] test2 环境 PyTorch 至 cu128**
+  - 变更：torch 2.8.0+cu128 / torchvision 0.23.0+cu128 / torchaudio 2.8.0+cu128（Python 3.9 下 cu128 最高可用组合，经 curl 断点续传 + 官方 sha256 校验后本地安装）
+  - 原因：旧 cu118 build 最高支持 sm_90，RTX 5060 Ti（sm_120/Blackwell）无法使用 GPU
+- **[修复] 双实例与 torchvision 循环导入**
+  - 变更：清理端口 8001 上的旧进程（内存中持有与磁盘不一致的 torch 状态，`/predict` 报 `partially initialized module 'torchvision' has no attribute 'extension'`）与后起的杂散实例，改为单一新实例启动
+  - 验证：`/predict` 四地址端到端通过（case_type=normal、head 0.97 / tail 0.99），预测时 GPU 利用率 58–76%
+
+## 2026-08-10
+
+### 挂车车挂号字符检测判断：99 组全量评估 + yolo_det 类别语义修正
+
+- **[新增] 评估管线** `D:\data2\weibu_zifu\scripts\eval_char_eval_dataset.py`：path3/path4 尾部原图 → `TailViewCropper`（chewei_detect）尾部车辆裁剪 → yolo_det 车挂号检测 → 字符检测 + 48 类分类 → 选"可靠字符最多"的框读序 → 方案B 判定（一致/不一致/无法判断）；无车辆/无框/不可读(<3 字符)组**作废**不计正确率
+- **[修正] yolo_det 类别语义**：**放大号 fangdahao=宽框、车挂号 chegua=窄框**（原训练启发式按宽高比标反）。`yolo_det/weights/best.pt|last.pt` names 交换为 `{0:'chegua', 1:'fangdahao'}`，原 names 备份 `yolo_det/weights/_backup/*_names_orig.pt`
+- **[结果] 99 组评估**：作废 25 / 不能确定 4 / 正确 67 / 错误 3，**判定正确率 67/70 = 95.7%**；3 错误全为 892/852 近牌（方案B M≤1 容忍的固有边界，规则不改）
+  - 交付：`char_eval_dataset/eval_result_v2.{xlsx,json}`（旧 eval_result 已由 v2 取代删除）
+
+### 放大号字符检测数据增强（脏数据检查 + 专属/通用增强 + 批量合成）
+
+- **[数据]** 放大号未标注 81 张移出至 `fang_da_hao/未标注/`，保留 305 张有效；**皖 加入字符集 → 49 类**（皖=id48 追加末尾，`char_set.json` 同步）
+- **[新增] 放大号专属增强** `scripts/char_det/augment_fangdahao.py`：油漆滑落毛刺（较强档）+ 矩形小凹槽凹凸模型（竖/横凹条、槽内字符微缩变暗）；按用户要求移除严重掉漆/字号不一/褶皱
+- **[增强] 通用增强复用**：亮斑 3-4 个、黑色扁平矩形条遮挡 6-8 条（角度池保证横/竖/斜全有）
+- **[产出] `fang_da_hao/fang_da_hao_aug/`**：train 3384 / val 85，QC 坏 0 / 空标 0 / 越界 0
+- **遗留**：放大号 49 类缺 class 27=T（源标注无 T，数据缺口非 bug）
+
+## 2026-08-11
+
+### 300 样本评估 + 尾部阈值定稿
+
+- **[评估]** `D:\test_dataset\eval_dataset` 300 组（270 normal / 21 change_trailer / 9 fake_plate）全量评估（run_20260811_192848，约 66 分钟）
+- **[落地] 阈值定稿并持久化 `thresholds.json`**：**head=0.80 / tail=0.98 / tail_char=0.70**（acc 97.0%，fpr 2.22%，fnr 0.10）
+
+### 记录详情页/统计页 GUI 改造（U1–U6）
+
+- **[U1] 尾部视角字符检测结果区块**：`plate_char_det/char_reader.py` 的 compare_pair 追加 `p3/p4_{chegua,fangdahao}_{seq,status,boxes}`；`my_predict_gui_new.py` 响应/落盘新增 `char_chegua3/4_seq`、`char_fangdahao3/4_seq` + 状态字段；`records.html` 新增 `buildCharResultHtml()` 渲染 图片3/图片4 + 车挂号/放大号 + 判定行（R/M/U）
+- **[U2] 判定链路精简**：移除「尾部视角车尾AI结果」等冗余行；新增「判定来源」行（字符检测/头部AI/尾部3/4视角AI/头部视角车尾AI/阈值兜底，兼容历史记录 `tail_ai_mode=char_compare_*`）
+- **[U3] 图片详情精简为两组**：头部视角车辆裁剪图（未遮挡车牌，新增 `_CROPPER_UNMASKED` 出 `vehicle1/2_unmasked`）+ 尾部视角车辆裁剪图（`_draw_plate_boxes()` 画 chegua 绿框/fangdahao 橙框 → `tail_view_crop{3,4}_boxed`）
+- **[U4] AI 触发但无理由根因修复**：`ai_judge_used` 无条件置 True ≠ LLM 被调用，由「判定来源」+字符证据块明确展示
+- **[U5] 耗时分析时间段可调**：`/api/stats/range` 新增 `bucket_edges` 参数（逗号分隔秒，非法→缺省），`dashboard.html` 顶部边界输入框
+- **[U6] 图片显示修复**：4 张新图加入 `contain-fit` 白名单（不再被 4/3 裁剪）；`fmt_seq` 真正实现低置信字符标 `?`，`charCell` 状态非 OK 但有序也显示
+- **[U7]（已回退）** 高相似度记录字符检测：先实施后按用户改口"尾部相似度高于阈值暂时不执行字符检测"，4 处后端 + 前端文案全部回退，保持原行为
+- **遗留**：历史记录（改动前生成）无 char_* 字段，详情页显示"未执行字符比对"——正常退化；高相似度记录（tail>0.98）不做字符检测为当前预期行为
+
+## 2026-08-12
+
+### 工程整理 + 新增图片自动标注
+
+- **[清理]** 删除 7 个评估日志、`scripts/__pycache__/`、过期的 `char_eval_dataset/eval_result.{json,xlsx}` 等；25 个一次性调试脚本归档 `scripts/_archive/`
+- **[泛化]** `yolo_det_to_labelimg.py`：新增 `--image_dir/--out_dir/--weight/--conf` 参数，中文路径 `np.fromfile+imdecode`，已存在 XML 幂等跳过，**剔除退化框**
+- **[新增]** `新增图片/image/` 80 张 → `yolo_det/weights/best.pt`(conf=0.25) → `新增图片/label_yolo/` 80 个 labelImg VOC XML（129 框：chegua 51 / fangdahao 78）
+
+### 工程重构：新增图片 → add_picture，车挂号/放大号分组
+
+- **[重构]** `新增图片/` → `add_picture/`；车挂号线移入 `che_gua_hao/`、放大号线移入 `fang_da_hao/`（数据/标注/训练产物/评估集全归位）；`scripts/` 下 16 个失效脚本路径全部修复
+  - 车挂号：`char_det_train|char_cls_train|char_det_data|char_cls_data|char_eval_dataset` → 加 `che_gua_hao/` 前缀
+  - 放大号：`fang_da_hao_det_train|fang_da_hao_cls_train|fang_da_hao_cls_data|fang_da_hao_aug` → 加 `fang_da_hao/` 前缀
+- **[新增] `scripts/yolo_char_label.py`**：按 `add_picture/label_yolo` 框裁剪 → `cheguahao/image`、`fangdahao/image`，各自调用对应字符检测+分类管线生成字符级 VOC XML 到 `yolo_char_label/`（**含低置信框**，供 labelImg 人工校正）
+  - 产出：车挂号裁剪 50 + 字符 XML 50；放大号新裁剪 79 + 字符 XML 79（旧 46 张保留，共 125 张）
+- **[合并]** 放大号人工校正 115 个字符标注（含 1 个 `鄂`，经用户确认保留）合入 `fang_da_hao/image|label`，现 420 张，一一对应无孤儿；`add_picture/fangdahao/image` 剩 10 张无标注图
+
+### 放大号字符集扩到 50 类（含鄂）重训 + GUI 应用
+
+- **[重训] 检测器（单类找框）** `fang_da_hao/fang_da_hao_det_train/yolo11n_fd_char_s1` → 生产 `yolo11n_fd_char/weights/best.pt`
+- **[重训] 分类器 49→50 类**（**鄂=id49** 追加末尾）`fang_da_hao/fang_da_hao_cls_train/yolo11n_fd_char_cls2` → 生产 `yolo11n_fd_char_cls/weights/best.pt`；`fd_cls_names.json` 50 类
+- **[应用]** `plate_char_det/char_reader.py` 修复 4 条结构重构后失效路径 + `fd_names` 改 range(50)；GUI `CharReader.warmup()` 全模型加载冒烟通过，`compare_pair` 端到端与离线评估一致
+
+### yolo_det v2 重训（精修数据 + 增强升级 + 热启动）
+
+- **[数据]** 用 `weibu_vehicle_crop/label_yolo` 精修标注重建 `yolo_data_dual_v2`：814 张（train 652 / val 162，剔除空标注 1 张；**未标注 1638 张仅训练排除、原文件不动**）；类别直接从 XML `name` 读取（不再按宽高比推断）；按图分层保证 chegua/fangdahao 双侧分布
+- **[训练]** `scripts/train_yolo_det_v2.py`：imgsz 640→**896**（车挂号窄框仅占图 ~11%，对小目标直接有利）、mosaic+**mixup=0.2+copy_paste=0.3**（flip 模式）+translate=0.15+degrees=5、close_mosaic=10、**热启动**生产 best.pt、150 epochs
+- **[指标]** 同口径对比（val 162 张、imgsz=896）：
+
+  | 权重 | mAP50 | mAP50-95 | chegua | fangdahao |
+  |---|---|---|---|---|
+  | OLD（生产旧版） | 0.9847 | 0.8914 | 0.9042 | 0.8786 |
+  | NEW（det_dual_v2） | **0.9935** | **0.9186** | **0.9338** | **0.9034** |
+
+- **[替换]** 新权重部署生产 `yolo_det/weights/best.pt|last.pt`，旧权重备份 `yolo_det/weights/_backup/best|last_20260812_pre_v2.pt`；生产 names 仍为 `{0:'chegua', 1:'fangdahao'}`，GUI 全模型加载冒烟通过

@@ -1,7 +1,25 @@
 import json
+import os
+import time
 from pathlib import Path
 
 import ollama
+
+# 本机 Ollama 直连：trust_env=False 避免 httpx 走系统代理(127.0.0.1:7897)导致 502，
+# 也避免 httpx 的默认超时掐断流式输出
+# timeout: 防 Ollama 挂起导致整请求无限阻塞 (connect/read 超时, 覆盖"无数据"挂起)
+# 300s: 多图复杂推理预留余量 (20260812_111412_e92134af 曾到 ~175s 边缘), env AI_OLLAMA_TIMEOUT_S 可覆盖
+_OLLAMA_TIMEOUT_S = float(os.environ.get("AI_OLLAMA_TIMEOUT_S", "300"))
+_OLLAMA = ollama.Client(trust_env=False, timeout=_OLLAMA_TIMEOUT_S)
+
+
+def _iter_with_deadline(stream, timeout_s):
+    """流式遍历加总时长上限, 防模型长时间生成拖住整个请求."""
+    deadline = time.monotonic() + timeout_s
+    for chunk in stream:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"Ollama 响应超过 {timeout_s:.0f}s, 中断")
+        yield chunk
 
 
 class TailVehicleCheck:
@@ -12,13 +30,13 @@ class TailVehicleCheck:
 
     VALID_LABELS = ["正常", "换挂", "无法判断"]
 
-    def __init__(self, model_name: str = "gemma4:latest"):
+    def __init__(self, model_name: str = "qwen3.5:9b"):
         self.model_name = model_name
         self.last_error = ""
         self.last_raw_output = ""
 
-    def _build_tail_compare_prompt(self) -> str:
-        return (
+    def _build_tail_compare_prompt(self, char_hint: str = "") -> str:
+        prompt = (
             "你是一名车辆尾部复核员，需要比较两张原始图中“中央车辆”尾部是否属于同一辆挂车。\n"
             "只输出 JSON；reason 最多 1-2 句话，不要长篇推理。\n\n"
             "【任务边界】\n"
@@ -105,6 +123,13 @@ class TailVehicleCheck:
             '  "structure_consistency": "一致/不一致/未检验/无法确认"\n'
             "}\n"
         )
+        if char_hint:
+            prompt += (
+                "\n【外部字符检测辅助信息（可信参考，来自专用OCR管线，仅当与图像所见一致时采用；"
+                "若与图像明显矛盾，以图像为准）】\n"
+                f"{char_hint}\n"
+            )
+        return prompt
 
     def _extract_json_payload(self, text: str) -> dict:
         text = (text or "").strip()
@@ -365,7 +390,7 @@ class TailVehicleCheck:
             "structure_consistency": "未检验",
         }
 
-    def _call_model(self, img1_path: str, img2_path: str) -> dict:
+    def _call_model(self, img1_path: str, img2_path: str, char_hint: str = "") -> dict:
         img1 = Path(img1_path)
         img2 = Path(img2_path)
         if not img1.exists() or not img2.exists():
@@ -375,18 +400,18 @@ class TailVehicleCheck:
         try:
             self.last_error = ""
             self.last_raw_output = ""
-            stream = ollama.chat(
+            stream = _OLLAMA.chat(
                 model=self.model_name,
                 messages=[{
                     "role": "user",
-                    "content": self._build_tail_compare_prompt(),
+                    "content": self._build_tail_compare_prompt(char_hint),
                     "images": [str(img1), str(img2)],
                 }],
                 stream=True,
             )
 
             print("\n--- AI分析中 ---\n")
-            for chunk in stream:
+            for chunk in _iter_with_deadline(stream, _OLLAMA_TIMEOUT_S):
                 content = chunk.get("message", {}).get("content", "")
                 if content:
                     print(content, end="", flush=True)
@@ -443,8 +468,8 @@ class TailVehicleCheck:
             print("请检查 Ollama 服务是否已启动，以及模型名称是否可用。")
             return self._empty_tail_result()
 
-    def check_tail_on_original(self, img1_path: str, img2_path: str) -> dict:
-        return self._call_model(img1_path, img2_path)
+    def check_tail_on_original(self, img1_path: str, img2_path: str, char_hint: str = "") -> dict:
+        return self._call_model(img1_path, img2_path, char_hint)
 
 
 if __name__ == "__main__":

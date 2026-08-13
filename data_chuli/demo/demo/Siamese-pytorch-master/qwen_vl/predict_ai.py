@@ -1,8 +1,26 @@
 import json
+import os
+import time
 from typing import Any, Dict, Optional
 
 import ollama
 from pathlib import Path
+
+# 本机 Ollama 直连：trust_env=False 避免 httpx 走系统代理(127.0.0.1:7897)导致 502，
+# 也避免 httpx 的默认超时掐断流式输出
+# timeout: 防 Ollama 挂起导致整请求无限阻塞 (connect/read 超时, 覆盖"无数据"挂起)
+# 300s: 多图复杂推理预留余量 (20260812_111412_e92134af 曾到 ~175s 边缘), env AI_OLLAMA_TIMEOUT_S 可覆盖
+_OLLAMA_TIMEOUT_S = float(os.environ.get("AI_OLLAMA_TIMEOUT_S", "300"))
+_OLLAMA = ollama.Client(trust_env=False, timeout=_OLLAMA_TIMEOUT_S)
+
+
+def _iter_with_deadline(stream, timeout_s):
+    """流式遍历加总时长上限, 防模型长时间生成拖住整个请求."""
+    deadline = time.monotonic() + timeout_s
+    for chunk in stream:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"Ollama 响应超过 {timeout_s:.0f}s, 中断")
+        yield chunk
 
 
 def _crop_flag_text(ok: Optional[bool]) -> str:
@@ -62,7 +80,7 @@ class VehicleCheck:
     HEAD_VALID_LABELS = ["fake_plate", "normal"]
     TAIL_VALID_LABELS = ["change_trailer", "normal"]
 
-    def __init__(self, model_name="gemma4:latest"):
+    def __init__(self, model_name="qwen3.5:9b"):
         self.model_name = model_name
         self.last_error = ""
         self.last_raw_output = ""
@@ -404,7 +422,7 @@ class VehicleCheck:
 
         try:
             self.last_error = ""
-            stream = ollama.chat(
+            stream = _OLLAMA.chat(
                 model=self.model_name,
                 messages=[{
                     "role": "user",
@@ -417,7 +435,7 @@ class VehicleCheck:
             full_output = ""
             print("\n--- AI分析中 ---\n")
 
-            for chunk in stream:
+            for chunk in _iter_with_deadline(stream, _OLLAMA_TIMEOUT_S):
                 content = chunk.get("message", {}).get("content", "")
                 if content:
                     print(content, end="", flush=True)
@@ -450,7 +468,7 @@ class VehicleCheck:
         try:
             self.last_error = ""
             self.last_raw_output = ""
-            stream = ollama.chat(
+            stream = _OLLAMA.chat(
                 model=self.model_name,
                 messages=[{
                     "role": "user",
@@ -461,7 +479,7 @@ class VehicleCheck:
             )
 
             print("\n--- AI分析中 ---\n")
-            for chunk in stream:
+            for chunk in _iter_with_deadline(stream, _OLLAMA_TIMEOUT_S):
                 content = chunk.get("message", {}).get("content", "")
                 if content:
                     print(content, end="", flush=True)
@@ -488,7 +506,7 @@ class VehicleCheck:
         try:
             self.last_error = ""
             self.last_raw_output = ""
-            stream = ollama.chat(
+            stream = _OLLAMA.chat(
                 model=self.model_name,
                 messages=[{
                     "role": "user",
@@ -499,7 +517,7 @@ class VehicleCheck:
             )
 
             print("\n--- AI分析中 ---\n")
-            for chunk in stream:
+            for chunk in _iter_with_deadline(stream, _OLLAMA_TIMEOUT_S):
                 content = chunk.get("message", {}).get("content", "")
                 if content:
                     print(content, end="", flush=True)
@@ -548,7 +566,7 @@ class VehicleCheck:
 
         try:
             self.last_error = ""
-            stream = ollama.chat(
+            stream = _OLLAMA.chat(
                 model=self.model_name,
                 messages=[{
                     "role": "user",
@@ -561,7 +579,7 @@ class VehicleCheck:
             full_output = ""
             print("\n--- AI分析中 ---\n")
 
-            for chunk in stream:
+            for chunk in _iter_with_deadline(stream, _OLLAMA_TIMEOUT_S):
                 content = chunk.get("message", {}).get("content", "")
                 if content:
                     print(content, end="", flush=True)
