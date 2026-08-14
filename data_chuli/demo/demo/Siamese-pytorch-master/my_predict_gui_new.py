@@ -32,6 +32,7 @@ from qwen_vl.predict_ai_shijiao2 import TailVehicleCheck
 from chewei_detect.chewei_detect import VehicleCropper as TailViewCropper
 from plate_char_det import CharReader
 from plate_char_det.char_reader import fmt_seq as _fmt_char_seq
+from plate_char_det.char_reader import GUA_CONF_LINE as _GUA_CONF_LINE
 
 parent_dir = os.path.dirname(os.path.dirname(__file__))
 if parent_dir not in sys.path:
@@ -58,12 +59,18 @@ _CHAR_READER: Optional[CharReader] = None
 _DEFAULT_HEAD_THRESHOLD = float(os.environ.get("HEAD_THRESHOLD_DEFAULT", "0.8"))
 _DEFAULT_TAIL_THRESHOLD = float(os.environ.get("TAIL_THRESHOLD_DEFAULT", "0.8"))
 _DEFAULT_TAIL_CHAR_THRESHOLD = float(os.environ.get("TAIL_CHAR_THRESHOLD_DEFAULT", "0.85"))
+_DEFAULT_TAIL_SIM_CHANGE_LOW = float(os.environ.get("TAIL_SIM_CHANGE_LOW_DEFAULT", "0.25"))
 _DIRECT_FAKE_PLATE_HEAD_THRESHOLD = float(os.environ.get("DIRECT_FAKE_PLATE_HEAD_THRESHOLD", "0.1"))
 _THRESHOLDS_FILE = os.path.join(os.path.dirname(__file__), "thresholds.json")
 _THRESHOLD_LOCK = threading.Lock()
 _HEAD_THRESHOLD: float = _DEFAULT_HEAD_THRESHOLD
 _TAIL_THRESHOLD: float = _DEFAULT_TAIL_THRESHOLD
 _TAIL_CHAR_THRESHOLD: float = _DEFAULT_TAIL_CHAR_THRESHOLD
+_TAIL_SIM_CHANGE_LOW: float = _DEFAULT_TAIL_SIM_CHANGE_LOW
+
+# 特殊号牌白名单: 字符比对判定"一致"但实为换挂的极少数号牌 (如 20260813_211147_3ce87a60 桂BA852).
+# 命中条件: 两侧去挂/厂/内后的车挂号序列完全相同且等于名单内号牌(不允许含?未知字符) → 作废字符判定.
+_CHAR_CHANGE_WHITELIST: set = {"桂BA852"}
 
 # 评估运行状态（后台线程 + 前端轮询）
 _EVAL_STATE: Dict[str, Any] = {
@@ -103,13 +110,14 @@ def _save_threshold_settings() -> None:
         "head_threshold": _HEAD_THRESHOLD,
         "tail_threshold": _TAIL_THRESHOLD,
         "tail_char_threshold": _TAIL_CHAR_THRESHOLD,
+        "tail_sim_change_low": _TAIL_SIM_CHANGE_LOW,
     }
     with open(_THRESHOLDS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def _load_threshold_settings() -> None:
-    global _HEAD_THRESHOLD, _TAIL_THRESHOLD, _TAIL_CHAR_THRESHOLD
+    global _HEAD_THRESHOLD, _TAIL_THRESHOLD, _TAIL_CHAR_THRESHOLD, _TAIL_SIM_CHANGE_LOW
 
     if not os.path.exists(_THRESHOLDS_FILE):
 
@@ -130,11 +138,16 @@ def _load_threshold_settings() -> None:
             "tail_char_threshold",
             payload.get("tail_char_threshold", _DEFAULT_TAIL_CHAR_THRESHOLD),
         )
+        _TAIL_SIM_CHANGE_LOW = _validate_threshold_value(
+            "tail_sim_change_low",
+            payload.get("tail_sim_change_low", _DEFAULT_TAIL_SIM_CHANGE_LOW),
+        )
     except Exception as e:
         print(f"[thresholds] failed to load {_THRESHOLDS_FILE}: {e}")
         _HEAD_THRESHOLD = _DEFAULT_HEAD_THRESHOLD
         _TAIL_THRESHOLD = _DEFAULT_TAIL_THRESHOLD
         _TAIL_CHAR_THRESHOLD = _DEFAULT_TAIL_CHAR_THRESHOLD
+        _TAIL_SIM_CHANGE_LOW = _DEFAULT_TAIL_SIM_CHANGE_LOW
 
 
 _load_threshold_settings()
@@ -528,9 +541,8 @@ class _MetricsStore:
             record_path = os.path.join(date_path, record_id)
             os.makedirs(record_path, exist_ok=True)
 
-            # 保存6张处理后的图片 (+ 未遮挡车辆裁剪图)
-            for key in ["vehicle1", "vehicle2", "head1", "head2", "tail1", "tail2",
-                        "vehicle1_unmasked", "vehicle2_unmasked"]:
+            # 保存6张处理后的图片 (未遮挡车辆裁剪图不再保存)
+            for key in ["vehicle1", "vehicle2", "head1", "head2", "tail1", "tail2"]:
                 data_url = previews.get(key, "")
                 if not data_url or not data_url.startswith("data:image/"):
                     continue
@@ -549,26 +561,28 @@ class _MetricsStore:
 
             # 保存原始图片和尾部视角裁切图（如果提供）
             if original_images:
-                for key in [
-                    "original1", "original2", "original3", "original4",
-                    "tail_view_crop3", "tail_view_crop4",
-                    "tail_view_crop3_boxed", "tail_view_crop4_boxed",
-                ]:
-                    data_url = original_images.get(key, "")
+                def _save_img(key: str, data_url: str) -> None:
                     if not data_url or not data_url.startswith("data:image/"):
-                        continue
-
+                        return
                     try:
-                        # 解析 data URL
                         header, encoded = data_url.split(",", 1)
                         img_data = base64.b64decode(encoded)
-
-                        # 保存图片
                         img_path = os.path.join(record_path, f"{key}.jpg")
                         with open(img_path, "wb") as f:
                             f.write(img_data)
                     except Exception:
-                        continue
+                        pass
+
+                for key in ["original1", "original2", "original3", "original4"]:
+                    _save_img(key, original_images.get(key, ""))
+
+                # 尾部视角: 检测到车挂号/放大号只保存框选图(boxed), 无框时才保存原裁剪图
+                for idx in ("3", "4"):
+                    boxed_url = original_images.get(f"tail_view_crop{idx}_boxed", "")
+                    if boxed_url.startswith("data:image/"):
+                        _save_img(f"tail_view_crop{idx}_boxed", boxed_url)
+                    else:
+                        _save_img(f"tail_view_crop{idx}", original_images.get(f"tail_view_crop{idx}", ""))
 
             # 保存元数据
             meta_path = os.path.join(record_path, "meta.json")
@@ -1162,7 +1176,9 @@ class RecordExporter:
             if image_types is None:
                 # 默认导出所有图片
                 image_types = ["original1", "original2", "original3", "original4",
-                               "tail_view_crop3", "tail_view_crop4", "vehicle1", "vehicle2",
+                               "tail_view_crop3", "tail_view_crop4",
+                               "tail_view_crop3_boxed", "tail_view_crop4_boxed",
+                               "vehicle1", "vehicle2",
                                "head1", "head2", "tail1", "tail2"]
 
             normalized: List[str] = []
@@ -1836,6 +1852,8 @@ def _record_metric(
         char_p3_fangdahao_status: str = "",
         char_p4_chegua_status: str = "",
         char_p4_fangdahao_status: str = "",
+        char_whitelist_voided: bool = False,
+        char_whitelist_void_reason: str = "",
 ) -> Optional[str]:
     """
     记录指标并保存图片
@@ -1914,6 +1932,8 @@ def _record_metric(
             "char_p3_fangdahao_status": char_p3_fangdahao_status or "",
             "char_p4_chegua_status": char_p4_chegua_status or "",
             "char_p4_fangdahao_status": char_p4_fangdahao_status or "",
+            "char_whitelist_voided": bool(char_whitelist_voided),
+            "char_whitelist_void_reason": char_whitelist_void_reason or "",
             "endpoint": endpoint,
             "source": source,
             "lat_ms": lat_ms,
@@ -1994,6 +2014,8 @@ def _record_metric(
         "char_p3_fangdahao_status": char_p3_fangdahao_status or "",
         "char_p4_chegua_status": char_p4_chegua_status or "",
         "char_p4_fangdahao_status": char_p4_fangdahao_status or "",
+        "char_whitelist_voided": bool(char_whitelist_voided),
+        "char_whitelist_void_reason": char_whitelist_void_reason or "",
     }
 
     if record_id:
@@ -2245,6 +2267,8 @@ def _build_classification_result() -> Dict[str, Any]:
         "char_compare_p3_status": None,
         "char_compare_p4_status": None,
         "char_compare_fallback_reason": None,
+        "char_whitelist_voided": False,
+        "char_whitelist_void_reason": None,
         "timing_ms": {},
     }
 
@@ -2320,6 +2344,11 @@ def _populate_ai_trace_texts(result: Dict[str, Any], head_prob: Optional[float])
             final_diff_summary = f"套牌：{full_reason}"
         elif not head_ai_used and head_prob is not None and head_prob <= _HEAD_THRESHOLD:
             final_diff_summary = "套牌：车头相似度低于阈值，判定为套牌"
+        elif result.get("diff_analyzed_part") == "vehicle_detection":
+            _cs = result.get("crop_status") or {}
+            _v1_txt = "有车" if _cs.get("vehicle1_detected") else "无车"
+            _v2_txt = "有车" if _cs.get("vehicle2_detected") else "无车"
+            final_diff_summary = f"图片1{{{_v1_txt}}}vs图片2{{{_v2_txt}}},判定为套牌"
     elif case_type == "change_trailer":
         if result.get("tail_ai_mode") == "char_compare_change":
             # 尾部字符检测不一致直接判换挂: 固定格式
@@ -2529,12 +2558,12 @@ def _run_char_compare_step(result: Dict[str, Any], char_compare_paths, tail_view
     result["char_compare_R"] = char_result.get("R")
     result["char_compare_M"] = char_result.get("M")
     result["char_compare_U"] = char_result.get("U")
-    result["char_compare_p3_seq"] = _fmt_char_seq(char_result.get("p3_seq", []))
-    result["char_compare_p4_seq"] = _fmt_char_seq(char_result.get("p4_seq", []))
+    result["char_compare_p3_seq"] = _fmt_char_seq(char_result.get("p3_seq", []), conf_line=_GUA_CONF_LINE)
+    result["char_compare_p4_seq"] = _fmt_char_seq(char_result.get("p4_seq", []), conf_line=_GUA_CONF_LINE)
     result["char_compare_p3_status"] = char_result.get("p3_status")
     result["char_compare_p4_status"] = char_result.get("p4_status")
-    result["char_chegua3_seq"] = _fmt_char_seq(char_result.get("p3_chegua_seq", []), conf_line=0.70)
-    result["char_chegua4_seq"] = _fmt_char_seq(char_result.get("p4_chegua_seq", []), conf_line=0.70)
+    result["char_chegua3_seq"] = _fmt_char_seq(char_result.get("p3_chegua_seq", []), conf_line=_GUA_CONF_LINE)
+    result["char_chegua4_seq"] = _fmt_char_seq(char_result.get("p4_chegua_seq", []), conf_line=_GUA_CONF_LINE)
     result["char_fangdahao3_seq"] = _fmt_char_seq(char_result.get("p3_fangdahao_seq", []), conf_line=0.90)
     result["char_fangdahao4_seq"] = _fmt_char_seq(char_result.get("p4_fangdahao_seq", []), conf_line=0.90)
     result["char_p3_chegua_status"] = char_result.get("p3_chegua_status")
@@ -2556,9 +2585,63 @@ def _run_char_compare_step(result: Dict[str, Any], char_compare_paths, tail_view
                 char_result.get("p4_chegua_boxes", []),
                 char_result.get("p4_fangdahao_boxes", []),
             )
-            result["tail_view_crop3_boxed"] = _bgr_to_data_url(_boxed3)
-            result["tail_view_crop4_boxed"] = _bgr_to_data_url(_boxed4)
+            # 仅当实际检测到车挂号/放大号框时才生成 boxed; 无框时不保存框选图
+            if char_result.get("p3_chegua_boxes") or char_result.get("p3_fangdahao_boxes"):
+                result["tail_view_crop3_boxed"] = _bgr_to_data_url(_boxed3)
+            if char_result.get("p4_chegua_boxes") or char_result.get("p4_fangdahao_boxes"):
+                result["tail_view_crop4_boxed"] = _bgr_to_data_url(_boxed4)
     return char_result
+
+
+def _apply_char_whitelist_void(result: Dict[str, Any]) -> bool:
+    """白名单号牌命中 → 作废字符比对判定 (verdict 置为 无法判断, 交相似度分带).
+
+    命中条件: 车挂号比对, 且两侧去挂/厂/内后的读序完全相同、不含未知字符(?), 且等于白名单号牌.
+    例: 20260813_211147_3ce87a60 桂BA852 两侧完全一致但实为换挂 → 作废字符"一致", 靠低相似度直判换挂.
+    """
+    if result.get("char_compare_plate_type") != "chegua":
+        return False
+    p3 = (result.get("char_compare_p3_seq") or "").strip()
+    p4 = (result.get("char_compare_p4_seq") or "").strip()
+    if not p3 or not p4:
+        return False
+    # 未知字符数必须为0 (0.85取信线下两侧全部可靠), 否则不允许作废
+    # 例: 5ab98815 两侧虽显示桂BA852但 U=2 → 不命中白名单 → 字符一致直判正常
+    if int(result.get("char_compare_U") or 0) != 0:
+        return False
+    if "?" in p3 or "?" in p4:
+        return False
+    if p3 == p4 and p3 in _CHAR_CHANGE_WHITELIST:
+        result["char_compare_verdict"] = "无法判断"
+        result["char_whitelist_voided"] = True
+        result["char_whitelist_void_reason"] = f"白名单号牌{p3}, 字符判定作废交相似度分带"
+        print(f"[predict] char whitelist hit {p3}, verdict voided -> similarity band")
+        return True
+    return False
+
+
+def _resolve_tail_ai_paths(result: Dict[str, Any], tail_original_paths, temp_files: List[str]) -> List[str]:
+    """送尾部视角AI的图片路径: 检测到车挂号/放大号时优先用框选图(boxed), 无框才用原裁剪图.
+
+    boxed 图以 data URL 存在 result 中, 此处解码写临时文件并登记到 temp_files 供 finally 清理.
+    """
+    out_paths = list(tail_original_paths)
+    for i, idx in ((0, "3"), (1, "4")):
+        data_url = result.get(f"tail_view_crop{idx}_boxed", "")
+        if not data_url.startswith("data:image/"):
+            continue
+        try:
+            header, encoded = data_url.split(",", 1)
+            img_data = base64.b64decode(encoded)
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", prefix=f"tail_ai_{idx}_", delete=False)
+            with open(tmp.name, "wb") as f:
+                f.write(img_data)
+            tmp.close()
+            out_paths[i] = tmp.name
+            temp_files.append(tmp.name)
+        except Exception:
+            pass
+    return out_paths
 
 
 def _bgr_to_data_url(bgr) -> str:
@@ -2610,6 +2693,8 @@ def _char_metric_kwargs(ai_result: Optional[Dict[str, Any]] = None) -> Dict[str,
         "char_p3_fangdahao_status": str(r.get("char_p3_fangdahao_status") or ""),
         "char_p4_chegua_status": str(r.get("char_p4_chegua_status") or ""),
         "char_p4_fangdahao_status": str(r.get("char_p4_fangdahao_status") or ""),
+        "char_whitelist_voided": bool(r.get("char_whitelist_voided", False)),
+        "char_whitelist_void_reason": str(r.get("char_whitelist_void_reason") or ""),
     }
 
 
@@ -3109,8 +3194,11 @@ def _classify_with_ai_second_judge_internal(
         vehicle1_detected = crop_status.get("vehicle1_detected", False)
         vehicle2_detected = crop_status.get("vehicle2_detected", False)
         if vehicle1_detected != vehicle2_detected:
+            _v1_txt = "有车" if vehicle1_detected else "无车"
+            _v2_txt = "有车" if vehicle2_detected else "无车"
+            _veh_diff_summary = f"图片1{{{_v1_txt}}}vs图片2{{{_v2_txt}}},判定为套牌"
             result["case_type"] = "fake_plate"
-            result["diff_desc"] = "输入图片中一辆有车一辆没车，判定为套牌"
+            result["diff_desc"] = _veh_diff_summary
             result["diff_analyzed_part"] = "vehicle_detection"
             return _populate_ai_trace_texts(result, head_prob)
 
@@ -3140,32 +3228,6 @@ def _classify_with_ai_second_judge_internal(
     char_compare_paths_valid = bool(
         char_compare_paths and char_compare_paths[0] and char_compare_paths[1]
     )
-
-    if (
-        (not force_head_ai_recheck)
-        and head_prob > head_direct_normal_th
-        and tail_prob > tail_direct_normal_th
-    ):
-        # 高相似短路前先做字符比对: 修复 0.99+ 相似但放大号/车挂号不一致的换挂漏检
-        if char_compare_paths_valid and _CHAR_READER is not None:
-            _char_res = _run_char_compare_step(result, char_compare_paths, tail_view_bgr)
-            if _char_res is not None and _char_res.get("verdict") == "不一致":
-                _reason = (
-                    f"字符比对不一致({result.get('char_compare_plate_type')}) "
-                    f"R={result.get('char_compare_R')} M={result.get('char_compare_M')}, 判定换挂"
-                )
-                result["case_type"] = "change_trailer"
-                result["tail_ai_mode"] = "char_compare_change"
-                result["ai_tail_reason"] = _reason
-                result["ai_judge_used"] = True
-                result["ai_ms"] = float(result["timing_ms"].get("char_compare_ms", 0.0) or 0.0)
-                result["diff_desc"] = _reason
-                result["diff_analyzed_part"] = "tail"
-                result["ai_diff_ms"] = 0.0
-                print("[predict] high-sim path char compare -> 不一致, flip to change_trailer")
-                return _populate_ai_trace_texts(result, head_prob)
-        result["case_type"] = "normal"
-        return _populate_ai_trace_texts(result, head_prob)
 
     head_need_ai = force_head_ai_recheck or (head_prob <= head_direct_normal_th)
     tail_need_ai = tail_prob <= tail_direct_normal_th
@@ -3248,41 +3310,77 @@ def _classify_with_ai_second_judge_internal(
             print("[predict] head AI concluded fake_plate, skipping all tail AI analysis")
             return _populate_ai_trace_texts(result, head_prob)
 
-        # === 方案B 字符检测优先判断 ===
-        if tail_need_ai and char_compare_paths_valid:
-            char_result = _run_char_compare_step(result, char_compare_paths, tail_view_bgr) or {}
-            char_verdict = char_result.get("verdict")
-            if char_verdict == "一致":
-                if tail_prob is not None and tail_prob > _TAIL_CHAR_THRESHOLD:
-                    # 字符一致 + 尾部相似度 > 阈值 → 直接判定正常, 跳过AI
-                    tail_verdict = "same"
-                    ai_tail_reason = (
-                        f"字符比对一致({char_result.get('plate_type_used')}) "
-                        f"R={char_result.get('R')} M={char_result.get('M')}, "
-                        f"相似度{tail_prob:.4f}>{_TAIL_CHAR_THRESHOLD}, 直接判定正常"
-                    )
-                    result["tail_ai_mode"] = "char_compare_normal"
-                else:
-                    # 字符一致但相似度不够 → 仍需 AI 复核
-                    result["tail_ai_mode"] = "char_agree_but_low_sim"
-                    result["char_compare_fallback_reason"] = (
-                        f"字符一致但尾部相似度{tail_prob if tail_prob is not None else '未知'}"
-                        f"<=阈值{_TAIL_CHAR_THRESHOLD}, 交AI复核"
-                    )
-            elif char_verdict == "不一致":
-                # 字符不一致 → 直接判定换挂, 跳过AI
-                tail_verdict = "different"
-                ai_tail_reason = (
-                    f"字符比对不一致({char_result.get('plate_type_used')}) "
-                    f"R={char_result.get('R')} M={char_result.get('M')}, 直接判定换挂"
+        # === 点①③ 字符检测先行 + 白名单作废 + 相似度分带 ===
+        # 所有尾部视角车辆裁剪图统一做字符检测; 字符能明确判定一致/不一致即跳过相似度/AI直接定案.
+        if char_compare_paths_valid:
+            _run_char_compare_step(result, char_compare_paths, tail_view_bgr)
+            _apply_char_whitelist_void(result)
+            _char_verdict = result.get("char_compare_verdict")
+            _char_ms = float(result["timing_ms"].get("char_compare_ms", 0.0) or 0.0)
+            _plate_type = result.get("char_compare_plate_type")
+            if _char_verdict == "一致":
+                _reason = (
+                    f"字符比对一致({_plate_type}) R={result.get('char_compare_R')} "
+                    f"M={result.get('char_compare_M')}, 直接判定正常"
                 )
-                result["tail_ai_mode"] = "char_compare_change"
-            elif char_verdict in ("无法判断", "作废"):
-                # 字符无法判断 → 回退 AI (带字符摘要)
-                result["tail_ai_mode"] = "char_undetermined_fallback_to_ai"
-                result["char_compare_fallback_reason"] = char_result.get("error")
-            else:
-                result["tail_ai_mode"] = "tail34_cropped_primary"
+                result["case_type"] = "normal"
+                result["tail_ai_mode"] = "char_compare_normal_direct"
+                result["ai_tail_reason"] = _reason
+                result["ai_judge_used"] = True
+                result["ai_ms"] = _char_ms
+                result["diff_desc"] = None
+                result["diff_analyzed_part"] = None
+                result["ai_diff_ms"] = 0.0
+                print("[predict] char compare -> 一致, direct normal")
+                return _populate_ai_trace_texts(result, head_prob)
+            if _char_verdict == "不一致":
+                _reason = (
+                    f"字符比对不一致({_plate_type}) R={result.get('char_compare_R')} "
+                    f"M={result.get('char_compare_M')}, 直接判定换挂"
+                )
+                result["case_type"] = "change_trailer"
+                result["tail_ai_mode"] = "char_compare_change_direct"
+                result["ai_tail_reason"] = _reason
+                result["ai_judge_used"] = True
+                result["ai_ms"] = _char_ms
+                result["diff_desc"] = _reason
+                result["diff_analyzed_part"] = "tail"
+                result["ai_diff_ms"] = 0.0
+                print("[predict] char compare -> 不一致, direct change_trailer")
+                return _populate_ai_trace_texts(result, head_prob)
+            # 字符无法判断/作废/白名单命中 → 相似度分带 (点③: 无漏检前提下最小化AI进入)
+            if head_verdict == "normal" and tail_prob is not None and tail_prob > tail_direct_normal_th:
+                # 高相似带 → 正常 (跳过AI)
+                _reason = (
+                    f"字符无法判定，尾部相似度{tail_prob:.4f}高于阈值{tail_direct_normal_th}, 直接判定正常"
+                )
+                result["case_type"] = "normal"
+                result["tail_ai_mode"] = "sim_high_normal_direct"
+                result["ai_tail_reason"] = _reason
+                result["ai_judge_used"] = False
+                result["ai_ms"] = _char_ms
+                result["diff_desc"] = None
+                result["diff_analyzed_part"] = None
+                result["ai_diff_ms"] = 0.0
+                print(f"[predict] char undetermined, tail sim {tail_prob:.4f} > {tail_direct_normal_th}, direct normal")
+                return _populate_ai_trace_texts(result, head_prob)
+            if tail_prob is not None and tail_prob < _TAIL_SIM_CHANGE_LOW:
+                # 低相似带 → 换挂 (跳过AI)
+                _reason = (
+                    f"字符无法判定，尾部相似度{tail_prob:.4f}低于阈值{_TAIL_SIM_CHANGE_LOW}, 直接判定换挂"
+                )
+                result["case_type"] = "change_trailer"
+                result["tail_ai_mode"] = "sim_low_change_direct"
+                result["ai_tail_reason"] = _reason
+                result["ai_judge_used"] = True
+                result["ai_ms"] = _char_ms
+                result["diff_desc"] = _reason
+                result["diff_analyzed_part"] = "tail"
+                result["ai_diff_ms"] = 0.0
+                print(f"[predict] char undetermined, tail sim {tail_prob:.4f} < {_TAIL_SIM_CHANGE_LOW}, direct change_trailer")
+                return _populate_ai_trace_texts(result, head_prob)
+            # 中间带 → 需尾部 AI 复核 (tail_verdict 保持 None)
+            result["tail_ai_mode"] = None
 
         if tail_need_ai and tail_verdict is None and use_tail_original_ai and _AI_TAIL_CHECKER is not None:
             print("[predict] tail similarity is below threshold, running 3/4 cropped tail-view AI first")
@@ -3291,10 +3389,12 @@ def _classify_with_ai_second_judge_internal(
                 result["tail_ai_mode"] = "tail34_cropped_primary"
             try:
                 _t_tail34_0 = time.perf_counter()
+                # 送尾部AI的图: 有车挂号/放大号框选时用框选图, 无框才用原裁剪图
+                _ai_tail_input_paths = _resolve_tail_ai_paths(result, tail_original_paths, temp_files)
                 ai_tail_payload = _apply_tail34_h2_guard(
                     _AI_TAIL_CHECKER.check_tail_on_original(
-                        tail_original_paths[0],
-                        tail_original_paths[1],
+                        _ai_tail_input_paths[0],
+                        _ai_tail_input_paths[1],
                         char_hint=_build_char_hint(result),
                     )
                 )
@@ -3993,6 +4093,8 @@ def predict() -> Any:
         "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
         "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
         "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
+        "char_whitelist_voided": ai_result.get("char_whitelist_voided", False),
+        "char_whitelist_void_reason": ai_result.get("char_whitelist_void_reason"),
         "lat_ms": round(lat_ms, 1),
     }
     _append_ai_trace_fields(resp, ai_result)
@@ -5259,27 +5361,31 @@ def get_thresholds() -> Any:
         "head_threshold": _HEAD_THRESHOLD,
         "tail_threshold": _TAIL_THRESHOLD,
         "tail_char_threshold": _TAIL_CHAR_THRESHOLD,
+        "tail_sim_change_low": _TAIL_SIM_CHANGE_LOW,
     })
 
 
 @app.post("/thresholds")
 def set_thresholds() -> Any:
-    global _HEAD_THRESHOLD, _TAIL_THRESHOLD, _TAIL_CHAR_THRESHOLD
+    global _HEAD_THRESHOLD, _TAIL_THRESHOLD, _TAIL_CHAR_THRESHOLD, _TAIL_SIM_CHANGE_LOW
 
     try:
         payload = request.get_json(silent=True) or {}
         head_threshold = payload.get("head_threshold", _HEAD_THRESHOLD)
         tail_threshold = payload.get("tail_threshold", _TAIL_THRESHOLD)
         tail_char_threshold = payload.get("tail_char_threshold", _TAIL_CHAR_THRESHOLD)
+        tail_sim_change_low = payload.get("tail_sim_change_low", _TAIL_SIM_CHANGE_LOW)
 
         new_head_threshold = _validate_threshold_value("head_threshold", head_threshold)
         new_tail_threshold = _validate_threshold_value("tail_threshold", tail_threshold)
         new_tail_char_threshold = _validate_threshold_value("tail_char_threshold", tail_char_threshold)
+        new_tail_sim_change_low = _validate_threshold_value("tail_sim_change_low", tail_sim_change_low)
 
         with _THRESHOLD_LOCK:
             _HEAD_THRESHOLD = new_head_threshold
             _TAIL_THRESHOLD = new_tail_threshold
             _TAIL_CHAR_THRESHOLD = new_tail_char_threshold
+            _TAIL_SIM_CHANGE_LOW = new_tail_sim_change_low
             _save_threshold_settings()
 
         return jsonify({
@@ -5288,6 +5394,7 @@ def set_thresholds() -> Any:
             "head_threshold": _HEAD_THRESHOLD,
             "tail_threshold": _TAIL_THRESHOLD,
             "tail_char_threshold": _TAIL_CHAR_THRESHOLD,
+            "tail_sim_change_low": _TAIL_SIM_CHANGE_LOW,
         })
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400

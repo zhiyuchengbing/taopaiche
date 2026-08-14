@@ -8,19 +8,28 @@ from pathlib import Path
 
 # 本机 Ollama 直连：trust_env=False 避免 httpx 走系统代理(127.0.0.1:7897)导致 502，
 # 也避免 httpx 的默认超时掐断流式输出
-# timeout: 防 Ollama 挂起导致整请求无限阻塞 (connect/read 超时, 覆盖"无数据"挂起)
-# 300s: 多图复杂推理预留余量 (20260812_111412_e92134af 曾到 ~175s 边缘), env AI_OLLAMA_TIMEOUT_S 可覆盖
-_OLLAMA_TIMEOUT_S = float(os.environ.get("AI_OLLAMA_TIMEOUT_S", "300"))
-_OLLAMA = ollama.Client(trust_env=False, timeout=_OLLAMA_TIMEOUT_S)
+# 超时中断默认关闭 (AI_OLLAMA_TIMEOUT_S 默认 0=不设超时):
+# 开启时 client connect/read 超时 + _iter_with_deadline 流式总时长上限,
+# 超时抛 TimeoutError -> 上层返回 unknown -> 相似度兜底强行判换挂, 会绕过AI误判.
+# 如需开启: 设 AI_OLLAMA_TIMEOUT_S=120 (秒).
+_OLLAMA_TIMEOUT_S = float(os.environ.get("AI_OLLAMA_TIMEOUT_S", "0"))
+_OLLAMA = ollama.Client(trust_env=False, timeout=(_OLLAMA_TIMEOUT_S or None))
 
 
 def _iter_with_deadline(stream, timeout_s):
-    """流式遍历加总时长上限, 防模型长时间生成拖住整个请求."""
-    deadline = time.monotonic() + timeout_s
-    for chunk in stream:
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"Ollama 响应超过 {timeout_s:.0f}s, 中断")
-        yield chunk
+    """流式遍历加总时长上限, 防模型长时间生成拖住整个请求.
+
+    timeout_s<=0 (默认) 时不做超时中断, 直接透传流.
+    """
+    if timeout_s and timeout_s > 0:
+        deadline = time.monotonic() + timeout_s
+        for chunk in stream:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Ollama 响应超过 {timeout_s:.0f}s, 中断")
+            yield chunk
+    else:
+        for chunk in stream:
+            yield chunk
 
 
 def _crop_flag_text(ok: Optional[bool]) -> str:

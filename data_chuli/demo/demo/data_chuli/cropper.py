@@ -10,7 +10,7 @@ _DEFAULT_MODEL_PATH = r"D:\project\\data_chuli\\demo\demo\\data_chuli\\data\chel
 
 
 class VehicleCropper:
-    def __init__(self, classes=None, conf_thresh=0.5, mask_plates=True, model_name=_DEFAULT_MODEL_PATH):
+    def __init__(self, classes=None, conf_thresh=0.2, mask_plates=True, model_name=_DEFAULT_MODEL_PATH):
         self.vehicle_classes = classes if classes is not None else [0]
         self.conf_thresh = conf_thresh
         self.mask_plates = mask_plates

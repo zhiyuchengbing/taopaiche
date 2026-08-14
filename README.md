@@ -1358,73 +1358,107 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
   - 变更：清理端口 8001 上的旧进程（内存中持有与磁盘不一致的 torch 状态，`/predict` 报 `partially initialized module 'torchvision' has no attribute 'extension'`）与后起的杂散实例，改为单一新实例启动
   - 验证：`/predict` 四地址端到端通过（case_type=normal、head 0.97 / tail 0.99），预测时 GPU 利用率 58–76%
 
-## 2026-08-10
+## 2026-08-12
 
-### 挂车车挂号字符检测判断：99 组全量评估 + yolo_det 类别语义修正
+### 尾部判定阈值定稿并持久化（300 样本全量评估）
 
-- **[新增] 评估管线** `D:\data2\weibu_zifu\scripts\eval_char_eval_dataset.py`：path3/path4 尾部原图 → `TailViewCropper`（chewei_detect）尾部车辆裁剪 → yolo_det 车挂号检测 → 字符检测 + 48 类分类 → 选"可靠字符最多"的框读序 → 方案B 判定（一致/不一致/无法判断）；无车辆/无框/不可读(<3 字符)组**作废**不计正确率
-- **[修正] yolo_det 类别语义**：**放大号 fangdahao=宽框、车挂号 chegua=窄框**（原训练启发式按宽高比标反）。`yolo_det/weights/best.pt|last.pt` names 交换为 `{0:'chegua', 1:'fangdahao'}`，原 names 备份 `yolo_det/weights/_backup/*_names_orig.pt`
-- **[结果] 99 组评估**：作废 25 / 不能确定 4 / 正确 67 / 错误 3，**判定正确率 67/70 = 95.7%**；3 错误全为 892/852 近牌（方案B M≤1 容忍的固有边界，规则不改）
-  - 交付：`char_eval_dataset/eval_result_v2.{xlsx,json}`（旧 eval_result 已由 v2 取代删除）
+- **[落地] 判定阈值定稿：head=0.80 / tail=0.98 / tail_char=0.70**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`、`data_chuli/demo/demo/Siamese-pytorch-master/thresholds.json`
+  - 变更：用 `D:\test_dataset\eval_dataset` 300 组全量评估（270 normal / 21 change_trailer / 9 fake_plate，run_20260811_192848，约 66 分钟），阈值扫描后定稿并持久化到 `thresholds.json`；`/predict` 响应与 `/thresholds` 同步支持 `tail_char_threshold`
+  - 效果：acc 97.0%、误报率 2.22%、漏检率 0.10；评估与生产使用同一组阈值
 
-### 放大号字符检测数据增强（脏数据检查 + 专属/通用增强 + 批量合成）
+### 尾部视角字符检测接入判定链路（方案B）
 
-- **[数据]** 放大号未标注 81 张移出至 `fang_da_hao/未标注/`，保留 305 张有效；**皖 加入字符集 → 49 类**（皖=id48 追加末尾，`char_set.json` 同步）
-- **[新增] 放大号专属增强** `scripts/char_det/augment_fangdahao.py`：油漆滑落毛刺（较强档）+ 矩形小凹槽凹凸模型（竖/横凹条、槽内字符微缩变暗）；按用户要求移除严重掉漆/字号不一/褶皱
-- **[增强] 通用增强复用**：亮斑 3-4 个、黑色扁平矩形条遮挡 6-8 条（角度池保证横/竖/斜全有）
-- **[产出] `fang_da_hao/fang_da_hao_aug/`**：train 3384 / val 85，QC 坏 0 / 空标 0 / 越界 0
-- **遗留**：放大号 49 类缺 class 27=T（源标注无 T，数据缺口非 bug）
+- **[新增] 车挂号/放大号字符比对判定**
+  - 文件：`plate_char_det/char_reader.py`、`my_predict_gui_new.py`
+  - 变更：path3/path4 尾部原图 → `TailViewCropper` 车辆裁剪 → yolo_det 检测车挂号/放大号框 → 字符检测+分类 → 方案B 比对（一致/不一致/无法判断）；字符不一致判换挂（`tail_ai_mode=char_compare_change`），一致且 `tail_prob>tail_char_threshold` 判正常（`char_compare_normal`）
+  - 效果：换挂判定获得字符级证据，尾部相似度低时不再单靠 AI 二次判断
 
-## 2026-08-11
-
-### 300 样本评估 + 尾部阈值定稿
-
-- **[评估]** `D:\test_dataset\eval_dataset` 300 组（270 normal / 21 change_trailer / 9 fake_plate）全量评估（run_20260811_192848，约 66 分钟）
-- **[落地] 阈值定稿并持久化 `thresholds.json`**：**head=0.80 / tail=0.98 / tail_char=0.70**（acc 97.0%，fpr 2.22%，fnr 0.10）
+- **[新增] 字符比对结果全链路透传**
+  - 文件：`my_predict_gui_new.py`
+  - 变更：响应/日志/落盘新增 `char_chegua3/4_seq`、`char_fangdahao3/4_seq`、`char_compare_*`（verdict/plate_type/R/M/U/seq/status）等字段；服务启动 `CharReader.warmup()` 预热
+  - 效果：详情页与导出可完整展示字符比对证据与判定依据
 
 ### 记录详情页/统计页 GUI 改造（U1–U6）
 
-- **[U1] 尾部视角字符检测结果区块**：`plate_char_det/char_reader.py` 的 compare_pair 追加 `p3/p4_{chegua,fangdahao}_{seq,status,boxes}`；`my_predict_gui_new.py` 响应/落盘新增 `char_chegua3/4_seq`、`char_fangdahao3/4_seq` + 状态字段；`records.html` 新增 `buildCharResultHtml()` 渲染 图片3/图片4 + 车挂号/放大号 + 判定行（R/M/U）
-- **[U2] 判定链路精简**：移除「尾部视角车尾AI结果」等冗余行；新增「判定来源」行（字符检测/头部AI/尾部3/4视角AI/头部视角车尾AI/阈值兜底，兼容历史记录 `tail_ai_mode=char_compare_*`）
-- **[U3] 图片详情精简为两组**：头部视角车辆裁剪图（未遮挡车牌，新增 `_CROPPER_UNMASKED` 出 `vehicle1/2_unmasked`）+ 尾部视角车辆裁剪图（`_draw_plate_boxes()` 画 chegua 绿框/fangdahao 橙框 → `tail_view_crop{3,4}_boxed`）
-- **[U4] AI 触发但无理由根因修复**：`ai_judge_used` 无条件置 True ≠ LLM 被调用，由「判定来源」+字符证据块明确展示
-- **[U5] 耗时分析时间段可调**：`/api/stats/range` 新增 `bucket_edges` 参数（逗号分隔秒，非法→缺省），`dashboard.html` 顶部边界输入框
-- **[U6] 图片显示修复**：4 张新图加入 `contain-fit` 白名单（不再被 4/3 裁剪）；`fmt_seq` 真正实现低置信字符标 `?`，`charCell` 状态非 OK 但有序也显示
-- **[U7]（已回退）** 高相似度记录字符检测：先实施后按用户改口"尾部相似度高于阈值暂时不执行字符检测"，4 处后端 + 前端文案全部回退，保持原行为
-- **遗留**：历史记录（改动前生成）无 char_* 字段，详情页显示"未执行字符比对"——正常退化；高相似度记录（tail>0.98）不做字符检测为当前预期行为
+- **[U1] 尾部视角字符检测结果区块**
+  - 文件：`templates/records.html`
+  - 变更：新增 `buildCharResultHtml()` 渲染 图片3/图片4 + 车挂号/放大号两行 + 判定行（R/M/U）；历史记录无字段显示"未执行字符比对"
+- **[U2] 判定链路精简 +「判定来源」**
+  - 文件：`templates/records.html`
+  - 变更：移除「尾部视角车尾AI结果」「是否触发3/4视角优先判定」等冗余行；新增「判定来源」行（字符检测/头部AI/尾部3/4视角AI/头部视角车尾AI/阈值兜底，兼容历史 `tail_ai_mode=char_compare_*`）
+- **[U3] 图片详情精简为两组**
+  - 文件：`my_predict_gui_new.py`、`templates/records.html`
+  - 变更：新增 `_CROPPER_UNMASKED=MainVehicleCropper(mask_plates=False)` 出未遮挡车牌 `vehicle1/2_unmasked`；`_draw_plate_boxes()` 画 chegua 绿框/fangdahao 橙框 → `tail_view_crop{3,4}_boxed` 并入落盘；`api_get_image` 历史记录字段回退
+- **[U4] AI 触发但无理由根因修复**
+  - 文件：`my_predict_gui_new.py`、`templates/records.html`
+  - 变更：`ai_judge_used` 无条件置 True 仅为"进入判定块"，≠ LLM 被调用；由「判定来源」+字符证据块明确展示真实判定路径
+- **[U5] 耗时分析时间段可调**
+  - 文件：`my_predict_gui_new.py`、`templates/dashboard.html`
+  - 变更：`/api/stats/range` 新增 `bucket_edges` 参数（逗号分隔秒，非法→缺省）；dashboard 耗时卡片顶部 3 个边界输入框 + 刷新
+- **[U6] 图片显示修复**
+  - 文件：`templates/records.html`、`plate_char_det/char_reader.py`
+  - 变更：U3 新增 4 张图加入 `contain-fit` 白名单（不再被 4/3 裁剪）；`fmt_seq` 真正实现低置信字符标 `?`，`charCell` 状态非 OK 但有序也显示
 
-## 2026-08-12
+- **[回退] 高相似度记录字符检测（U7）**
+  - 文件：`my_predict_gui_new.py`
+  - 变更：先实施"尾部相似度>阈值也执行字符检测"，后按用户改口全部回退——`tail>0.98` 记录仍提前返回、不执行字符检测，保持原行为
 
-### 工程整理 + 新增图片自动标注
+### yolo_det 车挂号/放大号检测：类别语义修正 + v2 重训部署
 
-- **[清理]** 删除 7 个评估日志、`scripts/__pycache__/`、过期的 `char_eval_dataset/eval_result.{json,xlsx}` 等；25 个一次性调试脚本归档 `scripts/_archive/`
-- **[泛化]** `yolo_det_to_labelimg.py`：新增 `--image_dir/--out_dir/--weight/--conf` 参数，中文路径 `np.fromfile+imdecode`，已存在 XML 幂等跳过，**剔除退化框**
-- **[新增]** `新增图片/image/` 80 张 → `yolo_det/weights/best.pt`(conf=0.25) → `新增图片/label_yolo/` 80 个 labelImg VOC XML（129 框：chegua 51 / fangdahao 78）
+- **[修正] yolo_det 类别语义**
+  - 文件：`plate_char_det/char_reader.py`
+  - 变更：确认**放大号=宽框、车挂号=窄框**；生产 `yolo_det/weights/best.pt|last.pt` 的 names 交换为 `{0:'chegua', 1:'fangdahao'}`，原 names 备份 `_backup/*_names_orig.pt`
+- **[替换] yolo_det v2 重训后部署生产**
+  - 文件：`plate_char_det/char_reader.py`（`_GUA_BOX_W` 指向 `D:\data2\weibu_zifu\yolo_det\weights\best.pt`）
+  - 变更：新数据（精修标注 814 张）重训 v2（imgsz 896，mAP50 0.9935：chegua 0.9338 / fangdahao 0.9034），新权重部署生产，旧权重备份 `_backup/best|last_20260812_pre_v2.pt`；GUI `CharReader.warmup()` 全模型加载冒烟通过
 
-### 工程重构：新增图片 → add_picture，车挂号/放大号分组
+- **[应用] 放大号字符集 49→50 类（含鄂）**
+  - 文件：`plate_char_det/char_reader.py`、`plate_char_det/fd_cls_names.json`
+  - 变更：放大号字符集扩入 `鄂`（id49 追加末尾），`fd_names` 改 `range(50)`；重训分类器后 `CharReader.warmup()` 全模型加载冒烟通过
 
-- **[重构]** `新增图片/` → `add_picture/`；车挂号线移入 `che_gua_hao/`、放大号线移入 `fang_da_hao/`（数据/标注/训练产物/评估集全归位）；`scripts/` 下 16 个失效脚本路径全部修复
-  - 车挂号：`char_det_train|char_cls_train|char_det_data|char_cls_data|char_eval_dataset` → 加 `che_gua_hao/` 前缀
-  - 放大号：`fang_da_hao_det_train|fang_da_hao_cls_train|fang_da_hao_cls_data|fang_da_hao_aug` → 加 `fang_da_hao/` 前缀
-- **[新增] `scripts/yolo_char_label.py`**：按 `add_picture/label_yolo` 框裁剪 → `cheguahao/image`、`fangdahao/image`，各自调用对应字符检测+分类管线生成字符级 VOC XML 到 `yolo_char_label/`（**含低置信框**，供 labelImg 人工校正）
-  - 产出：车挂号裁剪 50 + 字符 XML 50；放大号新裁剪 79 + 字符 XML 79（旧 46 张保留，共 125 张）
-- **[合并]** 放大号人工校正 115 个字符标注（含 1 个 `鄂`，经用户确认保留）合入 `fang_da_hao/image|label`，现 420 张，一一对应无孤儿；`add_picture/fangdahao/image` 剩 10 张无标注图
+## 2026-08-13
 
-### 放大号字符集扩到 50 类（含鄂）重训 + GUI 应用
+### 换挂检测判定链路改造（四点：字符先行/白名单、置信度与RMU、相似度分带、取消AI超时）
 
-- **[重训] 检测器（单类找框）** `fang_da_hao/fang_da_hao_det_train/yolo11n_fd_char_s1` → 生产 `yolo11n_fd_char/weights/best.pt`
-- **[重训] 分类器 49→50 类**（**鄂=id49** 追加末尾）`fang_da_hao/fang_da_hao_cls_train/yolo11n_fd_char_cls2` → 生产 `yolo11n_fd_char_cls/weights/best.pt`；`fd_cls_names.json` 50 类
-- **[应用]** `plate_char_det/char_reader.py` 修复 4 条结构重构后失效路径 + `fd_names` 改 range(50)；GUI `CharReader.warmup()` 全模型加载冒烟通过，`compare_pair` 端到端与离线评估一致
+- **[点①] 字符检测前置 + 特殊号牌白名单作废**
+  - 文件：`my_predict_gui_new.py`
+  - 变更：`_classify_with_ai_second_judge_internal` 重构尾部判定顺序——所有尾部车辆裁剪图（path3/path4）先统一执行字符比对，字符能明确结论（一致/不一致）时**跳过相似度比较直接判定**：
+    - 字符`一致` → 直接 `normal`（`tail_ai_mode=char_compare_normal_direct`）
+    - 字符`不一致` → 直接 `change_trailer`（`tail_ai_mode=char_compare_change_direct`）
+  - 白名单：`_CHAR_CHANGE_WHITELIST={"桂BA852"}`（模块级常量）。命中条件=车挂号比对且两侧序列完全相同且等于白名单内号牌且未知字符数 U=0（无 `?`）。命中 → 字符 verdict 作废为`无法判断`（`char_whitelist_voided=True`），交相似度分带处理，避免"车牌相同但挂车结构明显不同"的特例（如 3ce87a60）被字符一致漏判
+  - 5ab98815 防误伤：白名单条件要求 U==0 且两侧无 `?`（0.85 取信线下错读转未知），低置信错读的"桂BA852"不会触发作废
 
-### yolo_det v2 重训（精修数据 + 增强升级 + 热启动）
+- **[点②] 车挂号取信线 0.70→0.85 + 挂/厂/内字符过滤 + RMU 判定规则放宽**
+  - 文件：`plate_char_det/char_reader.py`
+  - 变更：
+    - `GUA_CONF_LINE = 0.85`（原 0.70）：单字符位错读误检多落在 0.70~0.85，抬高取信线把错读字符转 `?`/未知
+    - 新增 `_strip_invalid()`：车挂号/放大号比对前过滤 `挂`（车挂号后缀）、`厂`、`内`（附属标记），不参与号牌比对
+    - `compare()` 判定规则：`R<4` → 无法判断；`M>=3` → 不一致；`M==0` → 一致；`M=1..2` → 无法判断（不再直接判换挂/一致，交相似度分带/AI 复核）
+  - 效果：丢桂、W/B、F/E、重复C 等单字符位错读不再直接判换挂；6 条误检记录（2d0ad5a4/eb91b021/8ebd8ff3/36a40880/715305c7 等）全部转正常
 
-- **[数据]** 用 `weibu_vehicle_crop/label_yolo` 精修标注重建 `yolo_data_dual_v2`：814 张（train 652 / val 162，剔除空标注 1 张；**未标注 1638 张仅训练排除、原文件不动**）；类别直接从 XML `name` 读取（不再按宽高比推断）；按图分层保证 chegua/fangdahao 双侧分布
-- **[训练]** `scripts/train_yolo_det_v2.py`：imgsz 640→**896**（车挂号窄框仅占图 ~11%，对小目标直接有利）、mosaic+**mixup=0.2+copy_paste=0.3**（flip 模式）+translate=0.15+degrees=5、close_mosaic=10、**热启动**生产 best.pt、150 epochs
-- **[指标]** 同口径对比（val 162 张、imgsz=896）：
+- **[点③] 尾部相似度分带，无漏检前提下最小化 AI 进入**
+  - 文件：`my_predict_gui_new.py`、`thresholds.json`
+  - 变更：`thresholds.json` 新增 `tail_sim_change_low: 0.25`（启动加载 `_TAIL_SIM_CHANGE_LOW`，默认 0.25，env `TAIL_SIM_CHANGE_LOW_DEFAULT` 可覆盖）；`/thresholds` GET/POST 同步支持该字段
+  - 字符无法判断/作废后按相似度分带：
+    - `tail > 0.98` 且车头已正常 → 直接 `normal`（跳过 AI）
+    - `tail < 0.25` → 直接 `change_trailer`（跳过 AI）
+    - 中间带 `[0.25, 0.98]` → 尾部 AI 复核（机制不变）
+  - 保留 `tail_threshold=0.98` 不下调：真换挂 130434(sim0.976)/174706(sim0.957) 字符无法判断且落于 0.98 下方，降阈会漏检；"调低进入"通过字符先行+低带直判实现
 
-  | 权重 | mAP50 | mAP50-95 | chegua | fangdahao |
-  |---|---|---|---|---|
-  | OLD（生产旧版） | 0.9847 | 0.8914 | 0.9042 | 0.8786 |
-  | NEW（det_dual_v2） | **0.9935** | **0.9186** | **0.9338** | **0.9034** |
+- **[点④] ollama 超时中断默认关闭**
+  - 文件：`qwen_vl/predict_ai.py`、`qwen_vl/predict_ai_shijiao2.py`
+  - 变更：`_OLLAMA_TIMEOUT_S` 默认 `0`（不设超时），`_iter_with_deadline` 在 `timeout_s<=0` 时不设截止时间直接流式遍历；env `AI_OLLAMA_TIMEOUT_S` 可临时开启（如 `120`）
+  - 原因：旧实现 300s 超时中断使 AI 返回 unknown → 相似度兜底强判换挂（如 5ab98815 误判来源之一）；取消中断让 AI 完整判断，减少误报
 
-- **[替换]** 新权重部署生产 `yolo_det/weights/best.pt|last.pt`，旧权重备份 `yolo_det/weights/_backup/best|last_20260812_pre_v2.pt`；生产 names 仍为 `{0:'chegua', 1:'fangdahao'}`，GUI 全模型加载冒烟通过
+### 回归验证（export_20260813_222009 数据集 110 条，重跑字符比对）
+
+- 字符一致直判正常 14、字符不一致直判换挂 75、高相似带直判正常 6、低相似带直判换挂 2、中间带进入 AI 13
+- FP=9：其中 3 条为字符高置信错读（124801/134405/170254，读串为无效车牌如 `桂?PP?9HH`/`72U377720E?`，当前配置无法根除，属计划已知残余类）；6 条为旧 AI 被超时中断 → 相似度兜底误判（124600/135509/160110/163450/204713/210912），点④ 取消超时后目标修复
+- FN=0（无漏检）：174706/200737 两疑似样本均进入中间带 AI + 相似度兜底判换挂，无实际漏检
+- 关键结论：真换挂存在 char=不一致 且 tail 高至 0.9985（120848 等 8 条），**不能**按相似度盲目否决字符结论，否则将引入漏检
+
+- **[调整] `/thresholds` 接口暴露 `tail_sim_change_low`**
+  - 文件：`my_predict_gui_new.py`
+  - 变更：GET/POST `/thresholds` 增加 `tail_sim_change_low` 字段，与 head/tail/tail_char 三阈值一致
+  

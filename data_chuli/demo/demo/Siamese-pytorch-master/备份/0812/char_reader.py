@@ -30,7 +30,7 @@ _CLS_NAMES_JSON = os.path.join(_THIS_DIR, "cls_names.json")
 _FD_CLS_NAMES_JSON = os.path.join(_THIS_DIR, "fd_cls_names.json")
 
 # ── 参数 ──────────────────────────────────────────────────────────────
-GUA_CONF_LINE = 0.85        # 车挂号取信线 (0.70→0.85: 单字符错位误检多落在 0.70~0.85, 抬高把错读转未知)
+GUA_CONF_LINE = 0.70        # 车挂号取信线
 FD_CONF_LINE = 0.90         # 放大号取信线
 MIN_CHARS = 3               # 一图可读下限
 DET_CHAR_CONF = 0.25        # 字符检测 conf
@@ -75,11 +75,7 @@ def _crop_square(img, xyxy, pad_frac=0.10, imgsz=96):
 
 def _reading_order(boxes):
     """boxes: [(x1,y1,x2,y2),...] → 读序下标列表.
-    y-center 聚类 1-2 行 → 行内 x 左→右.
-
-    注意: 不再做 x 离群整侧滤除 — 尾部视角透视畸变会导致牌照字符间距不均,
-    整侧滤除会把真实字符(如放大号末尾 2/5)误判为离群砍掉. 附属标记(厂/内)
-    由 analyze_plate 按类别剔除, 不依赖几何间距."""
+    y-center 聚类 1-2 行 → 行内 x 左→右 → x 离群滤除."""
     if not boxes:
         return []
     cents = np.array([((b[1] + b[3]) / 2, (b[0] + b[2]) / 2) for b in boxes])
@@ -95,6 +91,17 @@ def _reading_order(boxes):
         row_groups = [sorted(order.tolist(), key=lambda i: cents[i, 1])]
     rows = []
     for row in row_groups:
+        row = list(row)
+        xs = np.array([cents[i, 1] for i in row])
+        if len(row) > 3:
+            o = np.argsort(xs)
+            gaps = np.diff(xs[o])
+            med_gap = float(np.median(gaps)) if len(gaps) else 0.0
+            if med_gap > 0:
+                mx = int(np.argmax(gaps))
+                if gaps[mx] > 2.5 * med_gap:
+                    keep_pos = o[mx + 1:] if mx < len(o) // 2 else o[:mx + 1]
+                    row = [row[int(i)] for i in keep_pos]
         row.sort(key=lambda i: cents[i, 1])
         rows.extend(row)
     return rows
@@ -169,15 +176,6 @@ def normalize_seq(seq, conf_line=None):
     return out
 
 
-def _strip_invalid(seq, bad=("厂", "内", "挂")):
-    """过滤非有效字符: 挂(车挂号后缀)/厂/内(附属标记) 不参与号牌比对.
-
-    挂/厂/内 不是号牌的有效区分字符, 保留会干扰编辑距离对齐与 R/M 计数,
-    比对前统一剔除 (两侧对称剔除, 不改变已读读序的相对位置).
-    """
-    return [(c, cf) for c, cf in seq if c not in bad]
-
-
 def compare(seqA, seqB, conf_line):
     """方案B 比对: 按位对齐 → R/M/U → 判定.
     Returns: {"verdict": "一致"|"不一致"|"无法判断", "R": int, "M": int, "U": int}
@@ -205,38 +203,37 @@ def compare(seqA, seqB, conf_line):
                 U += 1
     if R < 4:
         verdict = "无法判断"
-    elif M >= 3:
+    elif M >= 2:
         verdict = "不一致"
     elif M == 0:
         verdict = "一致"
-    else:
-        # M = 1..2: 单字符位错读(丢桂/WB/FE/重复C)多为误检, 不再直接判换挂/一致,
-        # 交相似度分带/AI 复核
+    elif M == 1 and U > 2:
         verdict = "无法判断"
+    else:
+        verdict = "一致"
     return {"verdict": verdict, "R": R, "M": M, "U": U}
 
 
 def analyze_plate(det, cls_model, names, img, conf_line):
     """单图字符检测→分类→读序.
     det: 字符检测 YOLO, cls_model: 字符分类 YOLO, names: 类名列表.
-
-    先分类全部字符框, 再按类别剔除 厂/内 附属标记(不依赖几何间距/高度,
-    字符大小允许不均), 最后对剩余框排读序.
     Returns: [(char, conf), ...] 按读序排列."""
     res = det.predict(img, conf=DET_CHAR_CONF, iou=DET_CHAR_IOU, verbose=False, imgsz=DET_CHAR_IMSZ)[0]
     if res.boxes is None or len(res.boxes) == 0:
         return []
     boxes = res.boxes.xyxy.cpu().numpy().tolist()
+    order = _reading_order(boxes)
+    ordered_boxes = [boxes[i] for i in order]
     crops = []
-    for b in boxes:
+    for b in ordered_boxes:
         c = _crop_square(img, b, imgsz=CLS_IMSZ)
         crops.append(c if c is not None else np.zeros((CLS_IMSZ, CLS_IMSZ, 3), dtype=np.uint8))
     preds = cls_model.predict(crops, imgsz=CLS_IMSZ, verbose=False)
-    seq_all = [(names[r.probs.top1], float(r.probs.top1conf)) for r in preds]
-    # 剔除 厂/内 附属标记 (如 "厂内" 贴纸)
-    keep_idx = [i for i, (c, _) in enumerate(seq_all) if c not in ("厂", "内")]
-    order = _reading_order([boxes[i] for i in keep_idx])
-    return [seq_all[keep_idx[i]] for i in order]
+    seq = []
+    for r in preds:
+        c = names[r.probs.top1]
+        seq.append((c, float(r.probs.top1conf)))
+    return seq
 
 
 # ── CharReader ────────────────────────────────────────────────────────
@@ -445,9 +442,6 @@ class CharReader:
         # 阶段1: 只读车挂号 (车挂号 一致/不一致 即定案, 不再读放大号)
         c3 = self._read_plate(vcrop3, "chegua", GUA_CONF_LINE) if vbox3 is not None else _empty_plate()
         c4 = self._read_plate(vcrop4, "chegua", GUA_CONF_LINE) if vbox4 is not None else _empty_plate()
-        # 过滤 挂/厂/内: 非有效区分字符, 比对前两侧对称剔除
-        c3["seq"] = _strip_invalid(c3["seq"])
-        c4["seq"] = _strip_invalid(c4["seq"])
         for _img_key, _rd in (("3", c3), ("4", c4)):
             result[f"p{_img_key}_chegua_seq"] = _rd["seq"]
             result[f"p{_img_key}_chegua_status"] = _rd["status"]
@@ -478,9 +472,6 @@ class CharReader:
         # 阶段2: 车挂号无法确定, 再读放大号
         f3 = self._read_plate(vcrop3, "fangdahao", FD_CONF_LINE) if vbox3 is not None else _empty_plate()
         f4 = self._read_plate(vcrop4, "fangdahao", FD_CONF_LINE) if vbox4 is not None else _empty_plate()
-        # 过滤 挂/厂/内 (放大号同样剔除附属标记)
-        f3["seq"] = _strip_invalid(f3["seq"])
-        f4["seq"] = _strip_invalid(f4["seq"])
         for _img_key, _rd in (("3", f3), ("4", f4)):
             result[f"p{_img_key}_fangdahao_seq"] = _rd["seq"]
             result[f"p{_img_key}_fangdahao_status"] = _rd["status"]
