@@ -223,7 +223,11 @@ def analyze_plate(det, cls_model, names, img, conf_line):
     先分类全部字符框, 再按类别剔除 厂/内 附属标记(不依赖几何间距/高度,
     字符大小允许不均), 最后对剩余框排读序.
     Returns: [(char, conf), ...] 按读序排列."""
-    res = det.predict(img, conf=DET_CHAR_CONF, iou=DET_CHAR_IOU, verbose=False, imgsz=DET_CHAR_IMSZ)[0]
+    # agnostic_nms=True: char_det 为多类检测器, ultralytics 默认按类别做 NMS,
+    # 同一位置不同类别的重复框互不压制会同时保留(如 cls=9 与 cls=7 坐标几乎相同),
+    # 导致同一字符被计入多次、序列比真值多。改为跨类别 NMS 后同一位置只留最高 conf 框。
+    res = det.predict(img, conf=DET_CHAR_CONF, iou=DET_CHAR_IOU, agnostic_nms=True,
+                      verbose=False, imgsz=DET_CHAR_IMSZ)[0]
     if res.boxes is None or len(res.boxes) == 0:
         return []
     boxes = res.boxes.xyxy.cpu().numpy().tolist()
@@ -564,13 +568,14 @@ class CharReader:
 # ── 便捷函数 ──────────────────────────────────────────────────────────
 
 def fmt_seq(seq, conf_line=0.70):
-    """格式化字符序列为可读字符串, 低置信字符加 ?."""
+    """格式化字符序列为可读字符串, 低置信字符直接过滤(不显示, 避免 ? 噪音).
+
+    只保留置信度 >= conf_line 的字符; R/M/U 判定仍基于原始序列, 过滤仅影响展示/记录.
+    """
     if not seq:
         return ""
     chars = []
     for c, cf in seq:
-        if cf is not None and cf < conf_line:
-            chars.append(f"{c}?")
-        else:
+        if cf is not None and cf >= conf_line:
             chars.append(c)
     return "".join(chars)
