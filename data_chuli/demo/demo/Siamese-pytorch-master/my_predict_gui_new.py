@@ -1812,6 +1812,7 @@ def _record_metric(
         ai_head_reason: Optional[str] = None,
         ai_tail_reason: Optional[str] = None,
         ai_ms: Optional[float] = None,
+        char_ms: Optional[float] = None,
         tail_ai_mode: str = "",
         stage1_case_type: str = "",
         tail_second_check_used: bool = False,
@@ -1819,12 +1820,6 @@ def _record_metric(
         tail_second_check_reason: str = "",
         tail_number_consistency: Optional[str] = None,
         tail_structure_consistency: Optional[str] = None,
-        ocr_used: bool = False,
-        ocr_match: Optional[bool] = None,
-        ocr_text1: Optional[str] = None,
-        ocr_text2: Optional[str] = None,
-        ocr_error: Optional[str] = None,
-        diff_desc: Optional[str] = None,
         diff_analyzed_part: Optional[str] = None,
         ai_diff_ms: Optional[float] = None,
         head_ai_display_text: Optional[str] = None,
@@ -1832,8 +1827,6 @@ def _record_metric(
         main_tail_ai_display_text: Optional[str] = None,
         final_diff_summary: Optional[str] = None,
         crop_status: Optional[Dict[str, Any]] = None,
-        head_ai_decision_source: Optional[str] = None,
-        main_tail_ai_decision_source: Optional[str] = None,
         char_compare_used: bool = False,
         char_compare_verdict: str = "",
         char_compare_plate_type: str = "",
@@ -1842,8 +1835,6 @@ def _record_metric(
         char_compare_U: Optional[int] = None,
         char_compare_p3_seq: str = "",
         char_compare_p4_seq: str = "",
-        char_compare_p3_status: str = "",
-        char_compare_p4_status: str = "",
         char_chegua3_seq: str = "",
         char_chegua4_seq: str = "",
         char_fangdahao3_seq: str = "",
@@ -1852,15 +1843,12 @@ def _record_metric(
         char_p3_fangdahao_status: str = "",
         char_p4_chegua_status: str = "",
         char_p4_fangdahao_status: str = "",
-        char_whitelist_voided: bool = False,
-        char_whitelist_void_reason: str = "",
 ) -> Optional[str]:
     """
     记录指标并保存图片
 
     Args:
         original_images: 包含原始图片的字典 {"original1": data_url, "original2": data_url}
-        diff_desc: AI细粒度差异分析描述
         diff_analyzed_part: 分析的部位
         ai_diff_ms: 差异分析耗时
 
@@ -1895,6 +1883,7 @@ def _record_metric(
             "ai_head_reason": ai_head_reason,
             "ai_tail_reason": ai_tail_reason,
             "ai_ms": ai_ms,
+            "char_ms": char_ms,
             "tail_ai_mode": tail_ai_mode,
             "stage1_case_type": stage1_case_type,
             "tail_second_check_used": bool(tail_second_check_used),
@@ -1902,18 +1891,11 @@ def _record_metric(
             "tail_second_check_reason": tail_second_check_reason,
             "tail_number_consistency": tail_number_consistency,
             "tail_structure_consistency": tail_structure_consistency,
-            "ocr_used": bool(ocr_used),
-            "ocr_match": ocr_match,
-            "ocr_text1": ocr_text1,
-            "ocr_text2": ocr_text2,
-            "ocr_error": ocr_error,
             "head_ai_display_text": head_ai_display_text,
             "tail34_ai_display_text": tail34_ai_display_text,
             "main_tail_ai_display_text": main_tail_ai_display_text,
             "final_diff_summary": final_diff_summary,
             "crop_status": crop_status,
-            "head_ai_decision_source": head_ai_decision_source,
-            "main_tail_ai_decision_source": main_tail_ai_decision_source,
             "char_compare_used": bool(char_compare_used),
             "char_compare_verdict": char_compare_verdict or "",
             "char_compare_plate_type": char_compare_plate_type or "",
@@ -1922,8 +1904,6 @@ def _record_metric(
             "char_compare_U": char_compare_U,
             "char_compare_p3_seq": char_compare_p3_seq or "",
             "char_compare_p4_seq": char_compare_p4_seq or "",
-            "char_compare_p3_status": char_compare_p3_status or "",
-            "char_compare_p4_status": char_compare_p4_status or "",
             "char_chegua3_seq": char_chegua3_seq or "",
             "char_chegua4_seq": char_chegua4_seq or "",
             "char_fangdahao3_seq": char_fangdahao3_seq or "",
@@ -1932,8 +1912,6 @@ def _record_metric(
             "char_p3_fangdahao_status": char_p3_fangdahao_status or "",
             "char_p4_chegua_status": char_p4_chegua_status or "",
             "char_p4_fangdahao_status": char_p4_fangdahao_status or "",
-            "char_whitelist_voided": bool(char_whitelist_voided),
-            "char_whitelist_void_reason": char_whitelist_void_reason or "",
             "endpoint": endpoint,
             "source": source,
             "lat_ms": lat_ms,
@@ -1943,8 +1921,6 @@ def _record_metric(
         }
 
         # 添加差异分析信息到meta
-        if diff_desc:
-            meta["diff_desc"] = diff_desc
         if diff_analyzed_part:
             meta["diff_analyzed_part"] = diff_analyzed_part
         if ai_diff_ms is not None:
@@ -1977,6 +1953,7 @@ def _record_metric(
         "ai_head_reason": ai_head_reason,
         "ai_tail_reason": ai_tail_reason,
         "ai_ms": ai_ms,
+        "char_ms": char_ms,
         "tail_ai_mode": tail_ai_mode,
         "stage1_case_type": stage1_case_type,
         "tail_second_check_used": bool(tail_second_check_used),
@@ -1984,18 +1961,11 @@ def _record_metric(
         "tail_second_check_reason": tail_second_check_reason,
         "tail_number_consistency": tail_number_consistency,
         "tail_structure_consistency": tail_structure_consistency,
-        "ocr_used": bool(ocr_used),
-        "ocr_match": ocr_match,
-        "ocr_text1": ocr_text1,
-        "ocr_text2": ocr_text2,
-        "ocr_error": ocr_error,
         "head_ai_display_text": head_ai_display_text,
         "tail34_ai_display_text": tail34_ai_display_text,
         "main_tail_ai_display_text": main_tail_ai_display_text,
         "final_diff_summary": final_diff_summary,
         "crop_status": crop_status,
-        "head_ai_decision_source": head_ai_decision_source,
-        "main_tail_ai_decision_source": main_tail_ai_decision_source,
         "char_compare_used": bool(char_compare_used),
         "char_compare_verdict": char_compare_verdict or "",
         "char_compare_plate_type": char_compare_plate_type or "",
@@ -2004,8 +1974,6 @@ def _record_metric(
         "char_compare_U": char_compare_U,
         "char_compare_p3_seq": char_compare_p3_seq or "",
         "char_compare_p4_seq": char_compare_p4_seq or "",
-        "char_compare_p3_status": char_compare_p3_status or "",
-        "char_compare_p4_status": char_compare_p4_status or "",
         "char_chegua3_seq": char_chegua3_seq or "",
         "char_chegua4_seq": char_chegua4_seq or "",
         "char_fangdahao3_seq": char_fangdahao3_seq or "",
@@ -2014,16 +1982,12 @@ def _record_metric(
         "char_p3_fangdahao_status": char_p3_fangdahao_status or "",
         "char_p4_chegua_status": char_p4_chegua_status or "",
         "char_p4_fangdahao_status": char_p4_fangdahao_status or "",
-        "char_whitelist_voided": bool(char_whitelist_voided),
-        "char_whitelist_void_reason": char_whitelist_void_reason or "",
     }
 
     if record_id:
         ev["record_id"] = record_id
         ev["image_dir"] = image_dir
         # 添加差异分析信息到日志
-        if diff_desc:
-            ev["diff_desc"] = diff_desc
         if diff_analyzed_part:
             ev["diff_analyzed_part"] = diff_analyzed_part
         if ai_diff_ms is not None:
@@ -2230,7 +2194,6 @@ def _build_classification_result() -> Dict[str, Any]:
         "ai_head_reason": None,
         "ai_tail_reason": None,
         "ai_ms": 0.0,
-        "diff_desc": None,
         "diff_analyzed_part": None,
         "ai_diff_ms": 0.0,
         "tail_ai_mode": "none",
@@ -2264,13 +2227,16 @@ def _build_classification_result() -> Dict[str, Any]:
         "char_compare_U": None,
         "char_compare_p3_seq": None,
         "char_compare_p4_seq": None,
-        "char_compare_p3_status": None,
-        "char_compare_p4_status": None,
-        "char_compare_fallback_reason": None,
         "char_whitelist_voided": False,
         "char_whitelist_void_reason": None,
         "timing_ms": {},
     }
+
+
+def _compute_ai_ms(result: Dict[str, Any]) -> float:
+    """AI判断耗时 = 真正进入 ollama 大模型的耗时之和（不含字符检测耗时）。"""
+    t = result.get("timing_ms") or {}
+    return round(sum(float(t.get(k) or 0.0) for k in ("head_ai_ms", "tail34_ai_ms", "main_tail_ai_ms")), 1)
 
 
 def _normalize_head_display_label(label: Optional[str]) -> str:
@@ -2350,16 +2316,20 @@ def _populate_ai_trace_texts(result: Dict[str, Any], head_prob: Optional[float])
             _v2_txt = "有车" if _cs.get("vehicle2_detected") else "无车"
             final_diff_summary = f"图片1{{{_v1_txt}}}vs图片2{{{_v2_txt}}},判定为套牌"
     elif case_type == "change_trailer":
-        if result.get("tail_ai_mode") == "char_compare_change":
+        if result.get("tail_ai_mode") in ("char_compare_change", "char_compare_change_direct"):
             # 尾部字符检测不一致直接判换挂: 固定格式
             p3 = str(result.get("char_compare_p3_seq") or "")
             p4 = str(result.get("char_compare_p4_seq") or "")
-            final_diff_summary = f"换挂：车挂号/放大号{p3}vs{p4}明显不同，判定为换挂"
+            final_diff_summary = f"车挂号/放大号字符检测结果{p3}vs{p4}，明显不一致，判定为换挂"
         elif main_tail_ai_display_text:
             full_reason = _clean_reason_text(result.get("ai_tail_reason"))
             final_diff_summary = f"换挂：{full_reason}" if full_reason else "换挂"
         elif tail34_ai_display_text:
             full_reason = _clean_reason_text(result.get("tail_second_check_reason"))
+            final_diff_summary = f"换挂：{full_reason}" if full_reason else "换挂"
+        else:
+            # 兜底: 直接判换挂但无 display_text 的路径（如 sim_low_change_direct）
+            full_reason = _clean_reason_text(result.get("ai_tail_reason"))
             final_diff_summary = f"换挂：{full_reason}" if full_reason else "换挂"
     elif case_type == "normal":
         final_diff_summary = None
@@ -2560,8 +2530,6 @@ def _run_char_compare_step(result: Dict[str, Any], char_compare_paths, tail_view
     result["char_compare_U"] = char_result.get("U")
     result["char_compare_p3_seq"] = _fmt_char_seq(char_result.get("p3_seq", []), conf_line=_GUA_CONF_LINE)
     result["char_compare_p4_seq"] = _fmt_char_seq(char_result.get("p4_seq", []), conf_line=_GUA_CONF_LINE)
-    result["char_compare_p3_status"] = char_result.get("p3_status")
-    result["char_compare_p4_status"] = char_result.get("p4_status")
     result["char_chegua3_seq"] = _fmt_char_seq(char_result.get("p3_chegua_seq", []), conf_line=_GUA_CONF_LINE)
     result["char_chegua4_seq"] = _fmt_char_seq(char_result.get("p4_chegua_seq", []), conf_line=_GUA_CONF_LINE)
     result["char_fangdahao3_seq"] = _fmt_char_seq(char_result.get("p3_fangdahao_seq", []), conf_line=0.90)
@@ -2683,8 +2651,6 @@ def _char_metric_kwargs(ai_result: Optional[Dict[str, Any]] = None) -> Dict[str,
         "char_compare_U": r.get("char_compare_U"),
         "char_compare_p3_seq": str(r.get("char_compare_p3_seq") or ""),
         "char_compare_p4_seq": str(r.get("char_compare_p4_seq") or ""),
-        "char_compare_p3_status": str(r.get("char_compare_p3_status") or ""),
-        "char_compare_p4_status": str(r.get("char_compare_p4_status") or ""),
         "char_chegua3_seq": str(r.get("char_chegua3_seq") or ""),
         "char_chegua4_seq": str(r.get("char_chegua4_seq") or ""),
         "char_fangdahao3_seq": str(r.get("char_fangdahao3_seq") or ""),
@@ -2693,8 +2659,7 @@ def _char_metric_kwargs(ai_result: Optional[Dict[str, Any]] = None) -> Dict[str,
         "char_p3_fangdahao_status": str(r.get("char_p3_fangdahao_status") or ""),
         "char_p4_chegua_status": str(r.get("char_p4_chegua_status") or ""),
         "char_p4_fangdahao_status": str(r.get("char_p4_fangdahao_status") or ""),
-        "char_whitelist_voided": bool(r.get("char_whitelist_voided", False)),
-        "char_whitelist_void_reason": str(r.get("char_whitelist_void_reason") or ""),
+        "char_ms": (r.get("timing_ms") or {}).get("char_compare_ms"),
     }
 
 
@@ -3174,7 +3139,6 @@ def _classify_with_ai_second_judge_internal(
             "ai_head_reason": str|None,    # AI车头判断依据
             "ai_tail_reason": str|None,    # AI最终采用的车尾判断依据
             "ai_ms": float,                # AI判断耗时(ms)
-            "diff_desc": str|None,         # 差异描述（仅异常车辆有）
             "diff_analyzed_part": str|None, # 分析的部位（head/tail/both）
             "ai_diff_ms": float,           # 差异分析耗时(ms)
             "tail_ai_mode": str,           # none / tail34_cropped_primary / tail34_cropped_then_main / main_tail_crop_only
@@ -3198,7 +3162,6 @@ def _classify_with_ai_second_judge_internal(
             _v2_txt = "有车" if vehicle2_detected else "无车"
             _veh_diff_summary = f"图片1{{{_v1_txt}}}vs图片2{{{_v2_txt}}},判定为套牌"
             result["case_type"] = "fake_plate"
-            result["diff_desc"] = _veh_diff_summary
             result["diff_analyzed_part"] = "vehicle_detection"
             return _populate_ai_trace_texts(result, head_prob)
 
@@ -3242,8 +3205,6 @@ def _classify_with_ai_second_judge_internal(
     if not ai_enabled or _AI_CHECKER is None or cropped_pils is None:
         result["case_type"] = stage1_case_type
         return _populate_ai_trace_texts(result, head_prob)
-
-    t_ai_start = time.perf_counter()
 
     # 保存裁切图片到临时文件
     temp_files = []
@@ -3302,9 +3263,8 @@ def _classify_with_ai_second_judge_internal(
 
         if head_verdict == "fake_plate":
             result["ai_judge_used"] = True
-            result["ai_ms"] = (time.perf_counter() - t_ai_start) * 1000.0
+            result["ai_ms"] = _compute_ai_ms(result)
             result["case_type"] = "fake_plate"
-            result["diff_desc"] = ai_head_reason or "车头AI判定为套牌"
             result["diff_analyzed_part"] = "head"
             result["ai_diff_ms"] = 0.0
             print("[predict] head AI concluded fake_plate, skipping all tail AI analysis")
@@ -3316,7 +3276,6 @@ def _classify_with_ai_second_judge_internal(
             _run_char_compare_step(result, char_compare_paths, tail_view_bgr)
             _apply_char_whitelist_void(result)
             _char_verdict = result.get("char_compare_verdict")
-            _char_ms = float(result["timing_ms"].get("char_compare_ms", 0.0) or 0.0)
             _plate_type = result.get("char_compare_plate_type")
             if _char_verdict == "一致":
                 _reason = (
@@ -3327,8 +3286,7 @@ def _classify_with_ai_second_judge_internal(
                 result["tail_ai_mode"] = "char_compare_normal_direct"
                 result["ai_tail_reason"] = _reason
                 result["ai_judge_used"] = True
-                result["ai_ms"] = _char_ms
-                result["diff_desc"] = None
+                result["ai_ms"] = _compute_ai_ms(result)
                 result["diff_analyzed_part"] = None
                 result["ai_diff_ms"] = 0.0
                 print("[predict] char compare -> 一致, direct normal")
@@ -3342,8 +3300,7 @@ def _classify_with_ai_second_judge_internal(
                 result["tail_ai_mode"] = "char_compare_change_direct"
                 result["ai_tail_reason"] = _reason
                 result["ai_judge_used"] = True
-                result["ai_ms"] = _char_ms
-                result["diff_desc"] = _reason
+                result["ai_ms"] = _compute_ai_ms(result)
                 result["diff_analyzed_part"] = "tail"
                 result["ai_diff_ms"] = 0.0
                 print("[predict] char compare -> 不一致, direct change_trailer")
@@ -3358,8 +3315,7 @@ def _classify_with_ai_second_judge_internal(
                 result["tail_ai_mode"] = "sim_high_normal_direct"
                 result["ai_tail_reason"] = _reason
                 result["ai_judge_used"] = False
-                result["ai_ms"] = _char_ms
-                result["diff_desc"] = None
+                result["ai_ms"] = _compute_ai_ms(result)
                 result["diff_analyzed_part"] = None
                 result["ai_diff_ms"] = 0.0
                 print(f"[predict] char undetermined, tail sim {tail_prob:.4f} > {tail_direct_normal_th}, direct normal")
@@ -3373,8 +3329,7 @@ def _classify_with_ai_second_judge_internal(
                 result["tail_ai_mode"] = "sim_low_change_direct"
                 result["ai_tail_reason"] = _reason
                 result["ai_judge_used"] = True
-                result["ai_ms"] = _char_ms
-                result["diff_desc"] = _reason
+                result["ai_ms"] = _compute_ai_ms(result)
                 result["diff_analyzed_part"] = "tail"
                 result["ai_diff_ms"] = 0.0
                 print(f"[predict] char undetermined, tail sim {tail_prob:.4f} < {_TAIL_SIM_CHANGE_LOW}, direct change_trailer")
@@ -3508,7 +3463,7 @@ def _classify_with_ai_second_judge_internal(
                 pass
 
     result["ai_judge_used"] = True
-    result["ai_ms"] = (time.perf_counter() - t_ai_start) * 1000.0
+    result["ai_ms"] = _compute_ai_ms(result)
 
     if (
         tail_need_ai
@@ -3528,7 +3483,6 @@ def _classify_with_ai_second_judge_internal(
     # ---- 综合判定 ----
     if ai_invalid:
         result["case_type"] = stage1_case_type
-        result["diff_desc"] = ai_fallback_reason
         result["diff_analyzed_part"] = None
         return _populate_ai_trace_texts(result, head_prob)
     elif head_verdict == "fake_plate":
@@ -3539,37 +3493,24 @@ def _classify_with_ai_second_judge_internal(
         result["case_type"] = "normal"
 
     if result["case_type"] == "normal":
-        result["diff_desc"] = None
         result["diff_analyzed_part"] = None
         result["ai_diff_ms"] = 0.0
         return _populate_ai_trace_texts(result, head_prob)
 
-    diff_desc_list: List[str] = []
     analyzed_parts: List[str] = []
 
     if result["case_type"] == "fake_plate":
         if ai_head_reason:
-            diff_desc_list.append(ai_head_reason)
             analyzed_parts.append("head")
         if tail_need_ai and ai_tail_reason:
-            diff_desc_list.append(ai_tail_reason)
             analyzed_parts.append("tail")
     elif result["case_type"] == "change_trailer":
         if ai_tail_reason:
-            diff_desc_list.append(ai_tail_reason)
             analyzed_parts.append("tail")
         if tail_second_reason and tail_second_reason != ai_tail_reason:
-            diff_desc_list.append(tail_second_reason)
             if "tail" not in analyzed_parts:
                 analyzed_parts.append("tail")
 
-    if diff_desc_list:
-        concise_desc = diff_desc_list[0]
-        if len(diff_desc_list) > 1:
-            concise_desc = f"{concise_desc}；另视角结论一致"
-        result["diff_desc"] = concise_desc
-    else:
-        result["diff_desc"] = None
     if analyzed_parts:
         uniq_parts = []
         for part in analyzed_parts:
@@ -3631,10 +3572,6 @@ def _append_ai_trace_fields(resp: Dict[str, Any], ai_result: Dict[str, Any]) -> 
         resp["final_diff_summary"] = ai_result.get("final_diff_summary")
     if ai_result.get("crop_status") is not None:
         resp["crop_status"] = ai_result.get("crop_status")
-    if ai_result.get("head_ai_decision_source") is not None:
-        resp["head_ai_decision_source"] = ai_result.get("head_ai_decision_source")
-    if ai_result.get("main_tail_ai_decision_source") is not None:
-        resp["main_tail_ai_decision_source"] = ai_result.get("main_tail_ai_decision_source")
     if ai_result.get("timing_ms"):
         resp["timing_ms"] = ai_result.get("timing_ms")
     return resp
@@ -4082,8 +4019,6 @@ def predict() -> Any:
         "char_compare_U": ai_result.get("char_compare_U"),
         "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
         "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
-        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
-        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
         "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
         "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
         "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
@@ -4092,12 +4027,12 @@ def predict() -> Any:
         "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
         "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
         "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
-        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
-        "char_whitelist_voided": ai_result.get("char_whitelist_voided", False),
-        "char_whitelist_void_reason": ai_result.get("char_whitelist_void_reason"),
         "lat_ms": round(lat_ms, 1),
     }
     _append_ai_trace_fields(resp, ai_result)
+    # 字符检测耗时（仅进入字符比对时有值）
+    if ai_result.get("char_compare_used"):
+        resp["char_ms"] = round((ai_result.get("timing_ms") or {}).get("char_compare_ms") or 0.0, 1)
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
@@ -4109,19 +4044,10 @@ def predict() -> Any:
         resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
     if ai_result.get("tail_structure_consistency") is not None:
         resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     # 添加细粒度差异分析结果（仅异常车辆）
-    if ai_result.get("diff_desc"):
-        resp["diff_desc"] = ai_result["diff_desc"]
+    if ai_result.get("diff_analyzed_part") is not None:
         resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+    if ai_result.get("ai_diff_ms") is not None:
         resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
     if err:
         resp["error"] = err
@@ -4162,12 +4088,6 @@ def predict() -> Any:
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         tail_number_consistency=ai_result.get("tail_number_consistency"),
         tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
-        diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
         head_ai_display_text=ai_result.get("head_ai_display_text"),
@@ -4175,8 +4095,6 @@ def predict() -> Any:
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
         crop_status=ai_result.get("crop_status"),
-        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
-        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
         **_char_metric_kwargs(ai_result),
     )
 
@@ -4380,8 +4298,6 @@ def predict_preview() -> Any:
         "char_compare_U": ai_result.get("char_compare_U"),
         "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
         "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
-        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
-        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
         "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
         "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
         "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
@@ -4390,13 +4306,15 @@ def predict_preview() -> Any:
         "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
         "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
         "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
-        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
         "stage1_case_type": ai_result.get("stage1_case_type"),
         "tail_second_check_used": ai_result.get("tail_second_check_used", False),
         "tail_second_check_result": ai_result.get("tail_second_check_result"),
         "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
     }
     _append_ai_trace_fields(resp, ai_result)
+    # 字符检测耗时（仅进入字符比对时有值）
+    if ai_result.get("char_compare_used"):
+        resp["char_ms"] = round((ai_result.get("timing_ms") or {}).get("char_compare_ms") or 0.0, 1)
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
@@ -4408,26 +4326,25 @@ def predict_preview() -> Any:
         resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
     if ai_result.get("tail_structure_consistency") is not None:
         resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     # 添加细粒度差异分析结果（仅异常车辆）
-    if ai_result.get("diff_desc"):
-        resp["diff_desc"] = ai_result["diff_desc"]
+    if ai_result.get("diff_analyzed_part") is not None:
         resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+    if ai_result.get("ai_diff_ms") is not None:
         resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
+    resp["lat_ms"] = round(lat_ms, 1)
 
     # 尾部视角带框图并入 original_images, 供落盘保存
     _merge_boxed_tail_images(original_images, ai_result)
+
+    # 4图预览: boxed 尾图注入 resp.previews 供前端显示
+    _pv = resp.get("previews") or {}
+    if ai_result.get("tail_view_crop3_boxed") or ai_result.get("tail_view_crop4_boxed"):
+        _pv["tail_view_crop3_boxed"] = ai_result.get("tail_view_crop3_boxed")
+        _pv["tail_view_crop4_boxed"] = ai_result.get("tail_view_crop4_boxed")
+        resp["previews"] = _pv
 
     # 保存图片并记录
     record_id = _record_metric(
@@ -4462,12 +4379,6 @@ def predict_preview() -> Any:
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         tail_number_consistency=ai_result.get("tail_number_consistency"),
         tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
-        diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
         head_ai_display_text=ai_result.get("head_ai_display_text"),
@@ -4475,8 +4386,6 @@ def predict_preview() -> Any:
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
         crop_status=ai_result.get("crop_status"),
-        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
-        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
         **_char_metric_kwargs(ai_result),
     )
 
@@ -4651,8 +4560,6 @@ def predict_upload_preview() -> Any:
         "char_compare_U": ai_result.get("char_compare_U"),
         "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
         "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
-        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
-        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
         "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
         "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
         "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
@@ -4661,13 +4568,15 @@ def predict_upload_preview() -> Any:
         "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
         "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
         "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
-        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
         "stage1_case_type": ai_result.get("stage1_case_type"),
         "tail_second_check_used": ai_result.get("tail_second_check_used", False),
         "tail_second_check_result": ai_result.get("tail_second_check_result"),
         "tail_second_check_reason": ai_result.get("tail_second_check_reason"),
     }
     _append_ai_trace_fields(resp, ai_result)
+    # 字符检测耗时（仅进入字符比对时有值）
+    if ai_result.get("char_compare_used"):
+        resp["char_ms"] = round((ai_result.get("timing_ms") or {}).get("char_compare_ms") or 0.0, 1)
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
@@ -4679,21 +4588,20 @@ def predict_upload_preview() -> Any:
         resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
     if ai_result.get("tail_structure_consistency") is not None:
         resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
+    resp["lat_ms"] = round(lat_ms, 1)
 
     # 尾部视角带框图并入 original_images, 供落盘保存
     _merge_boxed_tail_images(original_images, ai_result)
+
+    # 4图预览: boxed 尾图注入 resp.previews 供前端显示
+    _pv = resp.get("previews") or {}
+    if ai_result.get("tail_view_crop3_boxed") or ai_result.get("tail_view_crop4_boxed"):
+        _pv["tail_view_crop3_boxed"] = ai_result.get("tail_view_crop3_boxed")
+        _pv["tail_view_crop4_boxed"] = ai_result.get("tail_view_crop4_boxed")
+        resp["previews"] = _pv
 
     # 保存图片并记录
     file1_name = f1.filename if f1 else "unknown"
@@ -4702,9 +4610,9 @@ def predict_upload_preview() -> Any:
     file4_name = f4.filename if f4 else ""
 
     # 添加细粒度差异分析结果到响应（仅异常车辆）
-    if ai_result.get("diff_desc"):
-        resp["diff_desc"] = ai_result["diff_desc"]
+    if ai_result.get("diff_analyzed_part") is not None:
         resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+    if ai_result.get("ai_diff_ms") is not None:
         resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
 
     record_id = _record_metric(
@@ -4739,12 +4647,6 @@ def predict_upload_preview() -> Any:
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         tail_number_consistency=ai_result.get("tail_number_consistency"),
         tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
-        diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
         head_ai_display_text=ai_result.get("head_ai_display_text"),
@@ -4752,8 +4654,6 @@ def predict_upload_preview() -> Any:
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
         crop_status=ai_result.get("crop_status"),
-        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
-        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
         **_char_metric_kwargs(ai_result),
     )
 
@@ -4936,8 +4836,6 @@ def predict_upload() -> Any:
         "char_compare_U": ai_result.get("char_compare_U"),
         "char_compare_p3_seq": ai_result.get("char_compare_p3_seq"),
         "char_compare_p4_seq": ai_result.get("char_compare_p4_seq"),
-        "char_compare_p3_status": ai_result.get("char_compare_p3_status"),
-        "char_compare_p4_status": ai_result.get("char_compare_p4_status"),
         "char_chegua3_seq": ai_result.get("char_chegua3_seq"),
         "char_chegua4_seq": ai_result.get("char_chegua4_seq"),
         "char_fangdahao3_seq": ai_result.get("char_fangdahao3_seq"),
@@ -4946,9 +4844,11 @@ def predict_upload() -> Any:
         "char_p3_fangdahao_status": ai_result.get("char_p3_fangdahao_status"),
         "char_p4_chegua_status": ai_result.get("char_p4_chegua_status"),
         "char_p4_fangdahao_status": ai_result.get("char_p4_fangdahao_status"),
-        "char_compare_fallback_reason": ai_result.get("char_compare_fallback_reason"),
     }
     _append_ai_trace_fields(resp, ai_result)
+    # 字符检测耗时（仅进入字符比对时有值）
+    if ai_result.get("char_compare_used"):
+        resp["char_ms"] = round((ai_result.get("timing_ms") or {}).get("char_compare_ms") or 0.0, 1)
     if ai_result["ai_judge_used"]:
         resp["ai_judge_used"] = True
         resp["ai_head_result"] = ai_result["ai_head_result"]
@@ -4960,23 +4860,15 @@ def predict_upload() -> Any:
         resp["tail_number_consistency"] = ai_result.get("tail_number_consistency")
     if ai_result.get("tail_structure_consistency") is not None:
         resp["tail_structure_consistency"] = ai_result.get("tail_structure_consistency")
-    resp["ocr_used"] = ai_result.get("ocr_used", False)
-    if ai_result.get("ocr_match") is not None:
-        resp["ocr_match"] = ai_result.get("ocr_match")
-    if ai_result.get("ocr_text1") is not None:
-        resp["ocr_text1"] = ai_result.get("ocr_text1")
-    if ai_result.get("ocr_text2") is not None:
-        resp["ocr_text2"] = ai_result.get("ocr_text2")
-    if ai_result.get("ocr_error"):
-        resp["ocr_error"] = ai_result.get("ocr_error")
     # 添加细粒度差异分析结果（仅异常车辆）
-    if ai_result.get("diff_desc"):
-        resp["diff_desc"] = ai_result["diff_desc"]
+    if ai_result.get("diff_analyzed_part") is not None:
         resp["diff_analyzed_part"] = ai_result.get("diff_analyzed_part")
+    if ai_result.get("ai_diff_ms") is not None:
         resp["ai_diff_ms"] = round(ai_result.get("ai_diff_ms", 0.0), 1)
     if err:
         resp["error"] = err
     lat_ms = (time.perf_counter() - t0) * 1000.0
+    resp["lat_ms"] = round(lat_ms, 1)
 
     # 尾部视角带框图并入 original_images, 供落盘保存
     _merge_boxed_tail_images(original_images, ai_result)
@@ -5019,12 +4911,6 @@ def predict_upload() -> Any:
         tail_second_check_reason=str(ai_result.get("tail_second_check_reason") or ""),
         tail_number_consistency=ai_result.get("tail_number_consistency"),
         tail_structure_consistency=ai_result.get("tail_structure_consistency"),
-        ocr_used=bool(ai_result.get("ocr_used")),
-        ocr_match=ai_result.get("ocr_match"),
-        ocr_text1=ai_result.get("ocr_text1"),
-        ocr_text2=ai_result.get("ocr_text2"),
-        ocr_error=ai_result.get("ocr_error"),
-        diff_desc=ai_result.get("diff_desc"),
         diff_analyzed_part=ai_result.get("diff_analyzed_part"),
         ai_diff_ms=ai_result.get("ai_diff_ms"),
         head_ai_display_text=ai_result.get("head_ai_display_text"),
@@ -5032,8 +4918,6 @@ def predict_upload() -> Any:
         main_tail_ai_display_text=ai_result.get("main_tail_ai_display_text"),
         final_diff_summary=ai_result.get("final_diff_summary"),
         crop_status=ai_result.get("crop_status"),
-        head_ai_decision_source=ai_result.get("head_ai_decision_source"),
-        main_tail_ai_decision_source=ai_result.get("main_tail_ai_decision_source"),
         **_char_metric_kwargs(ai_result),
     )
 
@@ -6076,8 +5960,9 @@ def _run_evaluation_background(eval_dir: str, results_path: str, base_url: str) 
                 "input_mode": resp_data.get("input_mode"),
                 "http_status": status_code,
                 "lat_ms": resp_data.get("lat_ms"),
+                "char_ms": resp_data.get("char_ms"),
                 "error": resp_data.get("error"),
-                "diff_desc": resp_data.get("final_diff_summary") or resp_data.get("diff_desc"),
+                "final_diff_summary": resp_data.get("final_diff_summary"),
                 "char_compare_used": resp_data.get("char_compare_used", False),
                 "char_compare_verdict": resp_data.get("char_compare_verdict"),
                 "char_compare_plate_type": resp_data.get("char_compare_plate_type"),

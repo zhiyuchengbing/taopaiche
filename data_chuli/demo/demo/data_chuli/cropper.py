@@ -10,10 +10,20 @@ _DEFAULT_MODEL_PATH = r"D:\project\\data_chuli\\demo\demo\\data_chuli\\data\chel
 
 
 class VehicleCropper:
-    def __init__(self, classes=None, conf_thresh=0.2, mask_plates=True, model_name=_DEFAULT_MODEL_PATH):
+    def __init__(self, classes=None, conf_thresh=0.1, mask_plates=True, model_name=_DEFAULT_MODEL_PATH,
+                 center_weight=0.3, min_area_ratio=0.002):
+        """
+        conf_thresh: 车辆检测置信度阈值, 默认0.1(原0.2). 暗光/逆光/阴雨等难例下真车置信度常只有
+                     0.05~0.2, 阈值过高会把真车滤掉, 只剩角落误检框被选中 -> 裁剪到角落.
+        center_weight: 选框时中心距离的折扣系数(0~1). 0=纯按面积取最大框, 越大越偏向画面中心.
+                      默认0.3: 面积优先, 同时给贴边小框打折, 兼顾"取真车"与"避误检".
+        min_area_ratio: 面积小于画面该比例的候选直接排除, 过滤噪声小框.
+        """
         self.vehicle_classes = classes if classes is not None else [0]
         self.conf_thresh = conf_thresh
         self.mask_plates = mask_plates
+        self.center_weight = center_weight
+        self.min_area_ratio = min_area_ratio
         self.det_model = YOLO(model_name)
         self.catcher = lpr3.LicensePlateCatcher()
 
@@ -35,12 +45,23 @@ class VehicleCropper:
         if xyxy.size == 0:
             return pil_img, False
         H, W = img.shape[:2]
-        cx0 = W / 2.0
-        cy0 = H / 2.0
-        centers_x = (xyxy[:, 0] + xyxy[:, 2]) / 2.0
-        centers_y = (xyxy[:, 1] + xyxy[:, 3]) / 2.0
-        d2 = (centers_x - cx0) ** 2 + (centers_y - cy0) ** 2
-        idx = int(np.argmin(d2))
+        # 过滤面积过小的噪声框
+        x1s, y1s, x2s, y2s = xyxy[:, 0], xyxy[:, 1], xyxy[:, 2], xyxy[:, 3]
+        areas = (x2s - x1s) * (y2s - y1s)
+        valid = areas >= self.min_area_ratio * float(W * H)
+        if not valid.any():
+            valid[0] = True  # 全部过小则退回用第一个
+        xyxy = xyxy[valid]
+        x1s, y1s, x2s, y2s = xyxy[:, 0], xyxy[:, 1], xyxy[:, 2], xyxy[:, 3]
+        areas = (x2s - x1s) * (y2s - y1s)
+        # 归一化中心距离(相对画面半宽/半高, 0=正中心, 1=画面边缘)
+        cx0, cy0 = W / 2.0, H / 2.0
+        centers_x = (x1s + x2s) / 2.0
+        centers_y = (y1s + y2s) / 2.0
+        norm_d = np.sqrt(((centers_x - cx0) / cx0) ** 2 + ((centers_y - cy0) / cy0) ** 2)
+        # 面积优先, 中心距离打折: 越大越靠近中心的框胜出
+        score = areas * (1.0 - self.center_weight * np.clip(norm_d, 0.0, 1.0))
+        idx = int(np.argmax(score))
         x1, y1, x2, y2 = xyxy[idx]
         x1 = max(0, min(W - 1, int(x1)))
         y1 = max(0, min(H - 1, int(y1)))
