@@ -1461,4 +1461,82 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
 - **[调整] `/thresholds` 接口暴露 `tail_sim_change_low`**
   - 文件：`my_predict_gui_new.py`
   - 变更：GET/POST `/thresholds` 增加 `tail_sim_change_low` 字段，与 head/tail/tail_char 三阈值一致
+
+## 2026-08-17
+
+### 头视裁剪不对称直接报套牌（用户要求，未提交）
+
+- **[调整] 头视裁剪不对称时跳过相似度计算，直接判套牌**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - `_compute_probs_and_previews_pil`：当 `crop_status.head_ai_asymmetric` 成立（一边车头裁出、一边未裁出）时不再计算 `head_prob/tail_prob`，直接返回 `None`——此时相似度是“整车 vs 车头”的无意义垃圾值；
+    - `_classify_with_ai_second_judge_internal`：新增 `head_ai_asymmetric` 分支，直接 `case_type=fake_plate`、`stage1_case_type=fake_plate`、`diff_analyzed_part="头部视角车辆裁剪"`，跳过 AI 与字符比对；
+    - `_populate_ai_trace_texts`：该分支固定差异总结文案 `头部视角车辆检测中有车vs无车，直接判定为套牌`（不区分图1/图2）。
+  - 效果：头视裁剪不对称（远车/车头过小未裁出的一侧视为无车）样本不再用“整车 vs 车头”的垃圾相似度干扰判定，直接按套牌处理。
+
+### 判定模式（judge_mode）统计与筛选（未提交）
+
+- **[新增] 判定模式四分类：头部车辆裁剪 / 尾部字符检测 / ai判断 / 阈值兜底**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - 新增 `JUDGE_MODES` 与 `_derive_judge_mode()`：按判定链路优先级（① 头部车辆裁剪失败/不对称 → ② 字符检测一致/不一致直判 → ③ AI 确实给出结论 → ④ 其余全部归阈值兜底）仅依据已落盘字段归类记录；
+    - `/api/stats/range` 响应新增 `judge_mode_analysis`：`mode_breakdown`（各模式请求量 + 正常/换挂/套牌数）、`mode_pies`（按最终判定分组的模式占比）；
+    - `/api/records` 新增 `judge_mode` 查询参数，`_MetricsStore.query_records` 支持按判定模式筛选。
+  - 效果：统计页与记录页可看清“哪些请求真正走了 AI、哪些是字符检测/阈值兜底”，便于评估各链路的真实贡献。
+
+### 车头/尾部视角 AI 提示词收紧过度回退（未提交）
+
+- **[提示词] 车头视角 AI：仅“完全无清晰车头主体”才允许“质量太差”回退**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
+  - 变更：
+    - 规则 9 收窄：仅当任一张图完全无清晰车头主体（整图是过磅设备/建筑物/招牌等，或车头被完全遮挡不可见）时才写“输入图片质量太差，AI无法判断”，label 按相似度阈值兜底；
+    - 新增 9.1：主体过小/过糊/反光/过曝/背光/遮挡等成像问题 ≠ 质量太差，仍须按一票否决/同位比对尽力比较硬结构，给出 `fake_plate` 或 `normal`；
+    - 新增 9.2：已依据硬结构得出结论时，reason 直接写最终结论，不得再追加“质量太差”样板句。
+  - 效果：修复头部 AI 过度回退“质量太差”导致结果漂移；5 组尾部样本回归验证通过，服务已重启生效。
+
+- **[提示词] 尾部视角车尾 AI：可比对性只看尾部车体可见，禁止因号牌成像原因回退**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai_shijiao2.py`
+  - 变更：提示词由 H1–H9/5 步主流程/7 条防误判 重构为 C0–C2（可比对性）/ N1–N5（编号一致性）/ S1–S6（Tier-A 结构）/ B1–B2（颜色与 Tier-B）/ 防误判 5 条 / D1–D6（结论）：
+    - C0：可比对性只看挂车尾部车体是否可见——号牌不可读、放大号不可读、反光/过曝盖住号牌只影响编号比对，不影响可比对性；
+    - C2：两侧尾部车体均可见即 `pair_comparable=是`，即使编号都不可读也必须继续结构比对定案，禁止因编号不可读直接判“无法判断”；
+    - N2 / char_hint：外部字符检测给出 一致/不一致 时优先采信；作废/无法判断 不代表本对不可判断，按 N1 自行读框内编号或转结构比对；
+    - D6：禁止因号牌不可读、反光、过曝等成像原因输出“无法判断”——只导致放弃编号转结构，结构仍须给结论。
+  - 效果：减少尾部视角 AI 因“信息不足/回退”让出结论的频率；guard 层 `_apply_comparability_rules` 维持不动。
+
+### 车头 OCR 字段清理与车辆裁剪选框优化（08-16 提交 86de806）
+
+- **[清理] 移除残留 `ocr_*` 等废弃字段，差异总结统一由 `final_diff_summary` 承担**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：`_record_metric` 与各响应移除不再使用的 `ocr_used/ocr_match/ocr_text1/ocr_text2/ocr_error`、`diff_desc`、`head_ai_decision_source/main_tail_ai_decision_source`、`char_compare_p3/p4_status`、`char_whitelist_voided/reason` 等字段。
+  - 效果：落盘与日志字段收敛，避免陈旧字段污染。
+
+- **[耗时口径] 新增 `char_ms` 与 `_compute_ai_ms()`，AI 耗时不再混入字符检测耗时**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - 响应/落盘新增 `char_ms`（字符检测耗时，取自 `timing_ms.char_compare_ms`，仅进入字符比对时有值）；
+    - 新增 `_compute_ai_ms()`：AI 判断耗时 = 真正进入 ollama 大模型的耗时之和（`head_ai_ms` + `tail34_ai_ms` + `main_tail_ai_ms`），取代原先以 `t_ai_start` 全程计时（含字符检测耗时）的口径；
+    - `char_compare_change_direct` 固定换挂总结文案为 `车挂号/放大号字符检测结果{p3}vs{p4}，明显不一致，判定为换挂`。
+  - 效果：`ai_ms` 只代表大模型耗时，与 `char_ms` 分开统计，耗时口径更准确。
+
+- **[补齐] predict 系列响应补齐 `lat_ms`，预览接口注入 boxed 尾图**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：`predict_upload`、`predict_preview`、`predict_upload_preview` 补齐 `lat_ms`；预览接口将带框尾图 `tail_view_crop3/4_boxed` 注入 `resp.previews` 供前端展示。
+
+- **[调整] 车辆裁剪：conf 0.2→0.1 + 中心加权选框**
+  - 文件：`data_chuli/demo/demo/data_chuli/cropper.py`
+  - 变更：
+    - 车辆检测置信度阈值 0.2→0.1（暗光/逆光/阴雨难例真车置信度常只有 0.05~0.2，阈值过高会把真车滤掉，只剩角落误检框被选中 → 裁剪到角落）；
+    - 新增 `center_weight=0.3`、`min_area_ratio=0.002`：选框评分 `score = area × (1 − center_weight × 归一化中心距离)`，面积优先同时给贴边小框打折；过滤面积小于画面比例 0.002 的噪声小框。
+
+### 字符检测 agnostic NMS 去重与低置信字符过滤（08-16 提交 ed09da3）
+
+- **[修复] 字符检测预测加 `agnostic_nms=True`，消除跨类别重复框**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/plate_char_det/char_reader.py`
+  - 变更：`analyze_plate` 的 `det.predict(...)` 增加 `agnostic_nms=True`。char_det 为多类检测器，ultralytics 默认按类别 NMS，同一位置不同类别的重复框互不压制（如 cls=9 与 cls=7 坐标几乎相同）会同时保留，导致同一字符计入多次、序列比真值多（如 `桂BAT?T9955` 重复的 T/9/5）；改为跨类别 NMS 后同一位置只留最高置信度框。
+  - 效果：字符序列不再比真值多，读序更稳定。
+
+- **[调整] 低置信字符直接过滤，不再显示 `?`**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/plate_char_det/char_reader.py`
+  - 变更：`fmt_seq` 只保留置信度 ≥ conf_line 的字符，低置信字符直接过滤（原实现附加 `?`）；R/M/U 判定仍基于原始序列，过滤仅影响展示与记录。
+  - 说明：记录页展示层过滤在 `templates/records.html`，未入版本控制。
   

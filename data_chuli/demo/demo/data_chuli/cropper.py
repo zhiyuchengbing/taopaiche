@@ -10,11 +10,12 @@ _DEFAULT_MODEL_PATH = r"D:\project\\data_chuli\\demo\demo\\data_chuli\\data\chel
 
 
 class VehicleCropper:
-    def __init__(self, classes=None, conf_thresh=0.1, mask_plates=True, model_name=_DEFAULT_MODEL_PATH,
+    def __init__(self, classes=None, conf_thresh=0.2, mask_plates=True, model_name=_DEFAULT_MODEL_PATH,
                  center_weight=0.3, min_area_ratio=0.002):
         """
-        conf_thresh: 车辆检测置信度阈值, 默认0.1(原0.2). 暗光/逆光/阴雨等难例下真车置信度常只有
-                     0.05~0.2, 阈值过高会把真车滤掉, 只剩角落误检框被选中 -> 裁剪到角落.
+        conf_thresh: 车辆检测置信度阈值, 默认0.2. 2026-08-17 换 v3 模型后置信度大幅抬升
+                     (未见帧平均0.975、角落误检0), 从 0.1 调回 0.2, 滤掉低置信噪声框;
+                     原 0.1 是旧模型暗光难例真车置信度仅 0.05~0.2 时的权宜, 若回退旧模型需再降.
         center_weight: 选框时中心距离的折扣系数(0~1). 0=纯按面积取最大框, 越大越偏向画面中心.
                       默认0.3: 面积优先, 同时给贴边小框打折, 兼顾"取真车"与"避误检".
         min_area_ratio: 面积小于画面该比例的候选直接排除, 过滤噪声小框.

@@ -126,7 +126,9 @@ class VehicleCheck:
             "6. 只依据稳定结构和稳定标识；不得单凭色号深浅、亮暗、反光、阴影、过曝、污渍、角度、开灯、打码下结论。\n"
             "7. 建筑物遮挡、玻璃反光、夜间灯光、单边开灯、车外投影等默认成像干扰，不是套牌依据。\n"
             "8. 车内物品、单边车牌打码、货物橙黄编号牌、纯数字编号块、车牌黑块打码，均不是车体结构或身份标识依据。\n"
-            f"9. 若任一张图主要为过磅设备、建筑物、招牌等非车头主体，或主体过小、过糊、强反光、过曝、遮挡、靠猜测 → 写「输入图片质量太差，AI无法判断、{fallback_conclusion_text}」，label 设为 {low_similarity_fallback_label}，勿展开长篇分析。\n"
+            f"9. 仅当任一张图完全无清晰车头主体（整图是过磅设备/建筑物/招牌等，或车头被完全遮挡不可见）时 → 写「输入图片质量太差，AI无法判断、{fallback_conclusion_text}」，label 设为 {low_similarity_fallback_label}，勿展开长篇分析。\n"
+            "9.1 主体过小、过糊、反光、过曝、背光、遮挡等成像问题 ≠ 质量太差，不得因此逃避判断：仍须按一票否决/同位比对尽力比较硬结构并给出 fake_plate 或 normal。\n"
+            "9.2 已依据硬结构得出正常/套牌结论时，reason 直接写最终结论，不得再追加「质量太差」样板句。\n"
             "10. 关键证据不可靠时不得为得出 fake_plate 而放宽标准；快速收束结论。\n\n"
             "高优先级观察项：\n"
             "11. 优先比：格栅结构、大灯外轮廓、保险杠、后视镜总成形状与分色、车标轮廓与图案、驾驶室与引擎盖整体造型。\n"
@@ -152,7 +154,8 @@ class VehicleCheck:
             '  "label": "fake_plate 或 normal 或 unknown",\n'
             f'  "reason": "优先按模板：子区域=…；图1可读性=清晰|过曝|阴影|反光；图2可读性=…；硬结构=一致|不一致；文字证据=采纳|作废(原因)。'
             "一句到两句中文；触发 C2 无目标车辆时 label=fake_plate；触发 P3 全景vs特写不可比时写输入图片质量太差、AI无法判断，label=unknown；"
-            f"其他图片质量太差（非裁切问题）时可写输入图片质量太差、AI无法判断、{fallback_conclusion_text}，label 设为 {low_similarity_fallback_label}；"
+            f"仅当一侧完全无清晰车头主体（非成像问题）时才可写输入图片质量太差、AI无法判断、{fallback_conclusion_text}，label 设为 {low_similarity_fallback_label}；"
+            "成像差异/尺度差异/光照差异一律必须给出 fake_plate 或 normal，禁止用质量太差逃避；"
             "同部位对齐=否或任一侧不可读或触发 V1–V2 时 label 必须为 normal；"
             "禁止在 reason 写稳定标识差异的同时未说明两侧可读性；"
             'reason 只用中文，禁止出现 fake_plate、normal 等英文 label 词，可写套牌、正常、不能据此判套牌、不作为套牌依据"\n'

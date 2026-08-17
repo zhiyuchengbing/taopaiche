@@ -600,6 +600,7 @@ class _MetricsStore:
             case_type: Optional[str] = None,
             time_filter: Optional[str] = None,
             review_filter: Optional[str] = None,
+            judge_mode: Optional[str] = None,
             limit: int = 50,
             offset: int = 0
     ) -> Dict[str, Any]:
@@ -612,6 +613,7 @@ class _MetricsStore:
             case_type: 类型筛选 normal/fake_plate/change_trailer/all
             time_filter: 耗时筛选 lt3/3to60/60to150/gt150/all
             review_filter: 复核筛选 reviewed/unreviewed/all
+            judge_mode: 判定模式筛选 头部车辆裁剪/尾部字符检测/ai判断/阈值兜底/all
             limit: 返回条数
             offset: 偏移量
 
@@ -654,6 +656,11 @@ class _MetricsStore:
 
                                 if case_type and case_type != "all":
                                     if record.get("case_type") != case_type:
+                                        continue
+
+                                # 判定模式筛选
+                                if judge_mode and judge_mode != "all":
+                                    if _derive_judge_mode(record) != judge_mode:
                                         continue
 
                                 # 耗时筛选
@@ -2315,6 +2322,10 @@ def _populate_ai_trace_texts(result: Dict[str, Any], head_prob: Optional[float])
             _v1_txt = "有车" if _cs.get("vehicle1_detected") else "无车"
             _v2_txt = "有车" if _cs.get("vehicle2_detected") else "无车"
             final_diff_summary = f"图片1{{{_v1_txt}}}vs图片2{{{_v2_txt}}},判定为套牌"
+        elif result.get("diff_analyzed_part") == "头部视角车辆裁剪":
+            # 用户2026-08-17: 头视裁剪不对称(远车/车头过小未裁出的一侧视为无车),
+            # 不区分图片1还是图片2, 差异总结统一写固定文案.
+            final_diff_summary = "头部视角车辆检测中有车vs无车，直接判定为套牌"
     elif case_type == "change_trailer":
         if result.get("tail_ai_mode") in ("char_compare_change", "char_compare_change_direct"):
             # 尾部字符检测不一致直接判换挂: 固定格式
@@ -2940,13 +2951,19 @@ def _compute_probs_and_previews_pil(
         t1 = _crop_part_from_vehicle_pil(v1, cls_id=1)
         t2 = _crop_part_from_vehicle_pil(v2, cls_id=1)
 
-        head_prob = _HEAD_MODEL.detect_image(h1, h2)
-        tail_prob = _TAIL_MODEL.detect_image(t1, t2)
-
-        if hasattr(head_prob, "item"):
-            head_prob = head_prob.item()
-        if hasattr(tail_prob, "item"):
-            tail_prob = tail_prob.item()
+        # 2026-08-17 用户要求: 头视裁剪不对称(一边车头裁出/一边没裁出)时,
+        # 相似度是无意义的"整车vs车头"垃圾值, 不再强行计算, 由判定层直接报套牌.
+        crop_status = _build_crop_status(img1, img2, v1, v2, h1, h2, t1, t2, vehicle1_detected, vehicle2_detected)
+        if crop_status.get("head_ai_asymmetric"):
+            head_prob = None
+            tail_prob = None
+        else:
+            head_prob = _HEAD_MODEL.detect_image(h1, h2)
+            tail_prob = _TAIL_MODEL.detect_image(t1, t2)
+            if hasattr(head_prob, "item"):
+                head_prob = head_prob.item()
+            if hasattr(tail_prob, "item"):
+                tail_prob = tail_prob.item()
 
         previews: Dict[str, str] = {
             "vehicle1": _pil_to_jpeg_data_url(v1),
@@ -2971,11 +2988,14 @@ def _compute_probs_and_previews_pil(
         cropped_pils: Dict[str, Image.Image] = {
             "h1": h1, "h2": h2, "t1": t1, "t2": t2,
         }
-        crop_status = _build_crop_status(img1, img2, v1, v2, h1, h2, t1, t2, vehicle1_detected, vehicle2_detected)
         if crop_status.get("head_ai_asymmetric") or crop_status.get("main_tail_ai_asymmetric"):
             print(f"[predict] crop_status: {crop_status}")
 
-        return float(head_prob), float(tail_prob), previews, original_images, cropped_pils, crop_status, None
+        return (
+            None if head_prob is None else float(head_prob),
+            None if tail_prob is None else float(tail_prob),
+            previews, original_images, cropped_pils, crop_status, None,
+        )
     except Exception as e:
         return None, None, None, None, None, None, str(e)
 
@@ -3020,6 +3040,65 @@ def _classify_case(head_prob: Optional[float], tail_prob: Optional[float]) -> st
     if head_prob >= head_low_th and tail_prob <= tail_low_th:
         return "change_trailer"
     return "normal"
+
+
+# 判定模式（顺序即展示顺序）：头部车辆裁剪 / 尾部字符检测 / ai判断 / 阈值兜底
+JUDGE_MODES = ["头部车辆裁剪", "尾部字符检测", "ai判断", "阈值兜底"]
+
+
+def _derive_judge_mode(r: dict) -> str:
+    """按判定链路优先级，把一条记录归类到 4 种判定模式之一（仅依赖已落盘字段）。
+
+    与 _classify_with_ai_second_judge_internal 的决策顺序保持一致：
+      ① 头部车辆裁剪失败（车辆检测异常/头视裁剪不对称/无目标车辆）→ 直接套牌
+      ② 尾部字符检测：字符一致→正常、不一致→换挂，直判
+      ③ ai判断：车头AI判套牌、尾部视角车尾AI、头部视角车尾AI给出结论；
+        AI无法确定回退阈值的不算 ai判断
+      ④ 阈值兜底：其余全部（字符无法判断的相似度分带、AI回退阈值等）
+    """
+    if r.get("judge_mode"):  # 防御：未来若落盘则直接使用
+        return r["judge_mode"]
+
+    cs = r.get("crop_status") or {}
+    diff = r.get("diff_analyzed_part") or ""
+    tm = str(r.get("tail_ai_mode") or "")
+    case_type = r.get("case_type") or ""
+    _crop_no_veh = lambda s: any(m in s for m in _HEAD_CROP_NO_VEHICLE_MARKERS)
+    _ai_fallback = lambda s: any(m in s for m in _AI_QUALITY_TOO_POOR_MARKERS)
+
+    # ① 头部车辆裁剪：裁剪失败/车辆检测异常 → 直接套牌
+    if diff in ("vehicle_detection", "头部视角车辆裁剪"):
+        return "头部车辆裁剪"
+    if case_type == "fake_plate":
+        crop_failed = any(
+            cs.get(k) is False
+            for k in ("vehicle1_ok", "vehicle2_ok", "head1_ok", "head2_ok")
+        )
+        if crop_failed and not r.get("head_ai_used"):
+            return "头部车辆裁剪"
+        # 车头AI reason 含"无车/裁切失败"标记 → 头部裁剪
+        if _crop_no_veh(str(r.get("ai_head_reason") or "")):
+            return "头部车辆裁剪"
+
+    # ② 尾部字符检测：字符一致/不一致直判
+    if tm in ("char_compare_normal_direct", "char_compare_change_direct"):
+        return "尾部字符检测"
+    if r.get("char_compare_used") and r.get("char_compare_verdict") in ("一致", "不一致"):
+        return "尾部字符检测"
+
+    # ③ ai判断：AI 确实给出结论
+    if r.get("head_ai_used") and r.get("ai_head_result") == "fake_plate":
+        if not _crop_no_veh(str(r.get("ai_head_reason") or "")):
+            return "ai判断"
+    if r.get("tail_second_check_used"):
+        if r.get("tail_second_check_result") in ("change_trailer", "normal"):
+            return "ai判断"
+    if tm in ("tail34_cropped_primary", "tail34_cropped_then_main", "main_tail_crop_only"):
+        if not _ai_fallback(str(r.get("ai_tail_reason") or "")):
+            return "ai判断"
+
+    # ④ 阈值兜底（其余全部）
+    return "阈值兜底"
 
 
 def _classify_with_thresholds(
@@ -3163,6 +3242,16 @@ def _classify_with_ai_second_judge_internal(
             _veh_diff_summary = f"图片1{{{_v1_txt}}}vs图片2{{{_v2_txt}}},判定为套牌"
             result["case_type"] = "fake_plate"
             result["diff_analyzed_part"] = "vehicle_detection"
+            return _populate_ai_trace_texts(result, head_prob)
+
+        # 2026-08-17 用户要求: 头视裁剪不对称(一边车头裁出/一边没裁出)直接报套牌,
+        # 相似度已在 _compute_probs_and_previews_pil 跳过, 这里不进 AI/字符比对, 直接定案.
+        if crop_status.get("head_ai_asymmetric"):
+            result["case_type"] = "fake_plate"
+            result["stage1_case_type"] = "fake_plate"
+            result["diff_analyzed_part"] = "头部视角车辆裁剪"
+            result["ai_judge_used"] = False
+            print("[predict] head crop asymmetric -> direct fake_plate (头部视角车辆裁剪)")
             return _populate_ai_trace_texts(result, head_prob)
 
     if head_prob is None or tail_prob is None:
@@ -3711,7 +3800,14 @@ def api_stats_range() -> Any:
             "换挂": dict(lat_buckets),
             "套牌": dict(lat_buckets),
         }
-        
+
+        # 判定模式分析：各模式请求量+判定结果、按最终判定分组的模式占比
+        mode_breakdown = {
+            m: {"total": 0, "normal": 0, "fake_plate": 0, "change_trailer": 0}
+            for m in JUDGE_MODES
+        }
+        mode_pies = {k: {m: 0 for m in JUDGE_MODES} for k in ("总体", "正常", "换挂", "套牌")}
+
         total_latency = 0.0
         by_endpoint = {}
         
@@ -3755,6 +3851,20 @@ def api_stats_range() -> Any:
                                     summary["change_trailer_count"] += 1
                                 elif case_type == "abnormal":
                                     summary["abnormal_count"] += 1
+
+                                # 判定模式累计（仅统计有 lat_ms 的记录，保证各模式次数之和==总请求次数）
+                                judge_mode = _derive_judge_mode(record)
+                                mode_breakdown[judge_mode]["total"] += 1
+                                mode_pies["总体"][judge_mode] += 1
+                                if case_type == "normal":
+                                    mode_breakdown[judge_mode]["normal"] += 1
+                                    mode_pies["正常"][judge_mode] += 1
+                                elif case_type == "fake_plate":
+                                    mode_breakdown[judge_mode]["fake_plate"] += 1
+                                    mode_pies["套牌"][judge_mode] += 1
+                                elif case_type == "change_trailer":
+                                    mode_breakdown[judge_mode]["change_trailer"] += 1
+                                    mode_pies["换挂"][judge_mode] += 1
                             
                             # 统计端点信息
                             endpoint = record.get("endpoint", "")
@@ -3806,6 +3916,10 @@ def api_stats_range() -> Any:
         return jsonify({
             "summary": summary,
             "latency_analysis": latency_analysis,
+            "judge_mode_analysis": {
+                "mode_breakdown": mode_breakdown,
+                "mode_pies": mode_pies,
+            },
             "by_endpoint": by_endpoint,
             "recent": recent,
         })
@@ -4948,6 +5062,7 @@ def api_query_records() -> Any:
         case_type = request.args.get("case_type", "all")
         time_filter = request.args.get("time_filter", "all")
         review_filter = request.args.get("review_filter", "all")
+        judge_mode = request.args.get("judge_mode", "all")
         limit = int(request.args.get("limit", "50"))
         offset = int(request.args.get("offset", "0"))
 
@@ -4957,6 +5072,7 @@ def api_query_records() -> Any:
             case_type=case_type if case_type != "all" else None,
             time_filter=time_filter if time_filter != "all" else None,
             review_filter=review_filter if review_filter != "all" else None,
+            judge_mode=judge_mode if judge_mode != "all" else None,
             limit=limit,
             offset=offset
         )
