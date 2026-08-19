@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """CharReader — 尾部视角车挂号/放大号字符检测+比对.
 
-封装方案B 两阶段字符检测管线，支持车挂号(48类 conf=0.70)和放大号(49类 conf=0.90)。
+封装方案B 两阶段字符检测管线，支持车挂号(53类 conf=0.85)和放大号(53类 conf=0.90)。
 
 用法:
     reader = CharReader()
@@ -18,12 +18,15 @@ import cv2
 
 # ── 模型路径 (引用 D:\data2\weibu_zifu 成品权重) ──────────────────────
 # 2026-08-12 结构重构后路径更新: 车挂号->che_gua_hao/, 放大号->fang_da_hao/.
-# 放大号权重已替换: 检测器=单类找框(yolo11n_fd_char_s1), 分类器=50类含鄂(yolo11n_fd_char_cls2).
+# 2026-08-19 扩类重训后替换 (旧权重备份在 D:\data2\weibu_zifu\_backup\20260819\old\):
+#   车挂号: 检测器 yolo11n_char_v3 (53类), 分类器 yolo11n_char_cls3 (53类);
+#   放大号: 检测器 yolo11n_fd_char_v2 (单类找框), 分类器 yolo11n_fd_char_cls3 (53类).
+# 类名表从部署侧 cls_names.json / fd_cls_names.json (现 53 类) 动态读取, 不再硬编码类数.
 _GUA_BOX_W = r"D:\data2\weibu_zifu\yolo_det\weights\best.pt"
-_CHAR_DET_W = r"D:\data2\weibu_zifu\che_gua_hao\char_det_train\yolo11n_char_v2\weights\best.pt"
-_CHAR_CLS_W = r"D:\data2\weibu_zifu\che_gua_hao\char_cls_train\yolo11n_char_cls2\weights\best.pt"
-_FD_DET_W = r"D:\data2\weibu_zifu\fang_da_hao\fang_da_hao_det_train\yolo11n_fd_char\weights\best.pt"
-_FD_CLS_W = r"D:\data2\weibu_zifu\fang_da_hao\fang_da_hao_cls_train\yolo11n_fd_char_cls\weights\best.pt"
+_CHAR_DET_W = r"D:\data2\weibu_zifu\che_gua_hao\char_det_train\yolo11n_char_v3\weights\best.pt"
+_CHAR_CLS_W = r"D:\data2\weibu_zifu\che_gua_hao\char_cls_train\yolo11n_char_cls3\weights\best.pt"
+_FD_DET_W = r"D:\data2\weibu_zifu\fang_da_hao\fang_da_hao_det_train\yolo11n_fd_char_v2\weights\best.pt"
+_FD_CLS_W = r"D:\data2\weibu_zifu\fang_da_hao\fang_da_hao_cls_train\yolo11n_fd_char_cls3\weights\best.pt"
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _CLS_NAMES_JSON = os.path.join(_THIS_DIR, "cls_names.json")
@@ -298,7 +301,7 @@ class CharReader:
         if self._gua_names is None:
             with open(_CLS_NAMES_JSON, encoding="utf-8") as f:
                 id2char = json.load(f)
-            self._gua_names = [id2char[f"{i:02d}"] for i in range(48)]
+            self._gua_names = [id2char[f"{i:02d}"] for i in range(len(id2char))]
         return self._gua_names
 
     @property
@@ -306,7 +309,7 @@ class CharReader:
         if self._fd_names is None:
             with open(_FD_CLS_NAMES_JSON, encoding="utf-8") as f:
                 id2char = json.load(f)
-            self._fd_names = [id2char[f"{i:02d}"] for i in range(50)]
+            self._fd_names = [id2char[f"{i:02d}"] for i in range(len(id2char))]
         return self._fd_names
 
     # ── 预热 ────────────────────────────────────────────────────────

@@ -2315,18 +2315,17 @@ def _populate_ai_trace_texts(result: Dict[str, Any], head_prob: Optional[float])
         if head_ai_used and ai_head_result == "fake_plate":
             full_reason = _clean_reason_text(result.get("ai_head_reason")) or "车头AI判定为套牌"
             final_diff_summary = f"套牌：{full_reason}"
+        elif not head_ai_used and head_prob is not None and head_prob <= _HEAD_THRESHOLD:
+            final_diff_summary = "套牌：车头相似度低于阈值，判定为套牌"
         elif result.get("diff_analyzed_part") == "vehicle_detection":
-            # 车辆检测不对称(一张有车一张无车)是决定性原因, 优先于 head_prob 阈值说明
             _cs = result.get("crop_status") or {}
             _v1_txt = "有车" if _cs.get("vehicle1_detected") else "无车"
             _v2_txt = "有车" if _cs.get("vehicle2_detected") else "无车"
             final_diff_summary = f"图片1{{{_v1_txt}}}vs图片2{{{_v2_txt}}},判定为套牌"
         elif result.get("diff_analyzed_part") == "头部视角车辆裁剪":
-            # 历史兼容: 2026-08-17~08-18 旧规则(头视裁剪不对称 -> 直接套牌)落盘的记录仍带此 diff_analyzed_part;
-            # 2026-08-19 已删除该直判规则, 新记录不再走到这里.
-            final_diff_summary = "头部视角车辆裁剪失败（一侧车头未裁出），直接判定为套牌"
-        elif not head_ai_used and head_prob is not None and head_prob <= _HEAD_THRESHOLD:
-            final_diff_summary = "套牌：车头相似度低于阈值，判定为套牌"
+            # 用户2026-08-17: 头视裁剪不对称(远车/车头过小未裁出的一侧视为无车),
+            # 不区分图片1还是图片2, 差异总结统一写固定文案.
+            final_diff_summary = "头部视角车辆检测中有车vs无车，直接判定为套牌"
     elif case_type == "change_trailer":
         if result.get("tail_ai_mode") in ("char_compare_change", "char_compare_change_direct"):
             # 尾部字符检测不一致直接判换挂: 固定格式
@@ -2770,6 +2769,11 @@ def _reason_indicates_ai_quality_fallback(reason: Optional[str]) -> bool:
     return any(marker in text for marker in _AI_QUALITY_TOO_POOR_MARKERS)
 
 
+def _reason_indicates_head_crop_no_vehicle(reason: Optional[str]) -> bool:
+    text = str(reason or "")
+    return any(marker in text for marker in _HEAD_CROP_NO_VEHICLE_MARKERS)
+
+
 def _head_similarity_fallback_label(head_prob: Optional[float], head_threshold: float) -> str:
     if head_prob is not None and head_prob > head_threshold:
         return "normal"
@@ -2795,8 +2799,10 @@ def _resolve_head_ai_with_crop_guard(
     ai_head = str(ai_payload.get("label") or "").strip().lower()
     ai_head_reason = str(ai_payload.get("reason") or "").strip()
 
-    # 2026-08-19: 不再因 AI reason 含"无目标车辆/裁切失败侧无目标车辆"等标记强制判套牌
-    # (车头缺失可能只是成像/泛化问题, 由 AI 显式 label 或相似度回退决定).
+    if _reason_indicates_head_crop_no_vehicle(ai_head_reason):
+        reason = ai_head_reason or "裁切失败侧无目标车辆，判定套牌"
+        return "fake_plate", reason, "crop_no_vehicle"
+
     if ai_head in ("fake_plate", "normal"):
         return ai_head, ai_head_reason or "", "ai"
 
@@ -2945,15 +2951,19 @@ def _compute_probs_and_previews_pil(
         t1 = _crop_part_from_vehicle_pil(v1, cls_id=1)
         t2 = _crop_part_from_vehicle_pil(v2, cls_id=1)
 
-        # 2026-08-19 修正: 车头未裁出(如一侧车尾朝相机)可能只是成像差/模型泛化不足, 不再直接判套牌.
-        # 相似度照常计算作为粗门值: 低于阈值进车头AI复核, 高于阈值跳过车头AI进尾部字符检测.
+        # 2026-08-17 用户要求: 头视裁剪不对称(一边车头裁出/一边没裁出)时,
+        # 相似度是无意义的"整车vs车头"垃圾值, 不再强行计算, 由判定层直接报套牌.
         crop_status = _build_crop_status(img1, img2, v1, v2, h1, h2, t1, t2, vehicle1_detected, vehicle2_detected)
-        head_prob = _HEAD_MODEL.detect_image(h1, h2)
-        tail_prob = _TAIL_MODEL.detect_image(t1, t2)
-        if hasattr(head_prob, "item"):
-            head_prob = head_prob.item()
-        if hasattr(tail_prob, "item"):
-            tail_prob = tail_prob.item()
+        if crop_status.get("head_ai_asymmetric"):
+            head_prob = None
+            tail_prob = None
+        else:
+            head_prob = _HEAD_MODEL.detect_image(h1, h2)
+            tail_prob = _TAIL_MODEL.detect_image(t1, t2)
+            if hasattr(head_prob, "item"):
+                head_prob = head_prob.item()
+            if hasattr(tail_prob, "item"):
+                tail_prob = tail_prob.item()
 
         previews: Dict[str, str] = {
             "vehicle1": _pil_to_jpeg_data_url(v1),
@@ -3040,8 +3050,7 @@ def _derive_judge_mode(r: dict) -> str:
     """按判定链路优先级，把一条记录归类到 4 种判定模式之一（仅依赖已落盘字段）。
 
     与 _classify_with_ai_second_judge_internal 的决策顺序保持一致：
-      ① 头部车辆裁剪失败（车辆检测异常：一侧有车一侧无车）→ 直接套牌；
-        车头部件未裁出不再直判（2026-08-19），走相似度+车头AI+尾部字符链路
+      ① 头部车辆裁剪失败（车辆检测异常/头视裁剪不对称/无目标车辆）→ 直接套牌
       ② 尾部字符检测：字符一致→正常、不一致→换挂，直判
       ③ ai判断：车头AI判套牌、尾部视角车尾AI、头部视角车尾AI给出结论；
         AI无法确定回退阈值的不算 ai判断
@@ -3057,14 +3066,13 @@ def _derive_judge_mode(r: dict) -> str:
     _crop_no_veh = lambda s: any(m in s for m in _HEAD_CROP_NO_VEHICLE_MARKERS)
     _ai_fallback = lambda s: any(m in s for m in _AI_QUALITY_TOO_POOR_MARKERS)
 
-    # ① 头部车辆裁剪：车辆检测异常 → 直接套牌; "头部视角车辆裁剪"仅历史记录兼容(2026-08-19 前旧规则)
+    # ① 头部车辆裁剪：裁剪失败/车辆检测异常 → 直接套牌
     if diff in ("vehicle_detection", "头部视角车辆裁剪"):
         return "头部车辆裁剪"
     if case_type == "fake_plate":
-        # 2026-08-19: 仅车辆级裁剪失败算"头部车辆裁剪"; 车头部件失败不再直判套牌.
         crop_failed = any(
             cs.get(k) is False
-            for k in ("vehicle1_ok", "vehicle2_ok")
+            for k in ("vehicle1_ok", "vehicle2_ok", "head1_ok", "head2_ok")
         )
         if crop_failed and not r.get("head_ai_used"):
             return "头部车辆裁剪"
@@ -3078,10 +3086,9 @@ def _derive_judge_mode(r: dict) -> str:
     if r.get("char_compare_used") and r.get("char_compare_verdict") in ("一致", "不一致"):
         return "尾部字符检测"
 
-    # ③ ai判断：AI 确实给出结论；AI无法判断、回退阈值定案的不算 ai判断（与尾部 AI 分支一致）
+    # ③ ai判断：AI 确实给出结论
     if r.get("head_ai_used") and r.get("ai_head_result") == "fake_plate":
-        _head_reason = str(r.get("ai_head_reason") or "")
-        if not _crop_no_veh(_head_reason) and not _ai_fallback(_head_reason):
+        if not _crop_no_veh(str(r.get("ai_head_reason") or "")):
             return "ai判断"
     if r.get("tail_second_check_used"):
         if r.get("tail_second_check_result") in ("change_trailer", "normal"):
@@ -3237,9 +3244,15 @@ def _classify_with_ai_second_judge_internal(
             result["diff_analyzed_part"] = "vehicle_detection"
             return _populate_ai_trace_texts(result, head_prob)
 
-        # 2026-08-19 修正: 车头部件未裁出(如一侧车尾朝相机)不再直判套牌,
-        # 相似度照常计算, 走"阈值 -> 车头AI -> 尾部字符检测"链路.
-        # (原 2026-08-17 "头视裁剪不对称 -> 直接套牌" 规则已删除: 它误把车头检测失败当成了车辆检测失败)
+        # 2026-08-17 用户要求: 头视裁剪不对称(一边车头裁出/一边没裁出)直接报套牌,
+        # 相似度已在 _compute_probs_and_previews_pil 跳过, 这里不进 AI/字符比对, 直接定案.
+        if crop_status.get("head_ai_asymmetric"):
+            result["case_type"] = "fake_plate"
+            result["stage1_case_type"] = "fake_plate"
+            result["diff_analyzed_part"] = "头部视角车辆裁剪"
+            result["ai_judge_used"] = False
+            print("[predict] head crop asymmetric -> direct fake_plate (头部视角车辆裁剪)")
+            return _populate_ai_trace_texts(result, head_prob)
 
     if head_prob is None or tail_prob is None:
         return _populate_ai_trace_texts(result, head_prob)
@@ -5077,9 +5090,6 @@ def api_get_record(record_id: str) -> Any:
         if not record:
             return jsonify({"error": "记录不存在"}), 404
 
-        record = dict(record)
-        # 判定来源统一为判定模式分类（与判定模式筛选/运行统计同源，见 _derive_judge_mode）
-        record["judge_mode"] = _derive_judge_mode(record)
         return jsonify(record)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

@@ -1539,4 +1539,60 @@ OCR 判套牌但车头又很像时，强制加一次头部 AI 复核
   - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/plate_char_det/char_reader.py`
   - 变更：`fmt_seq` 只保留置信度 ≥ conf_line 的字符，低置信字符直接过滤（原实现附加 `?`）；R/M/U 判定仍基于原始序列，过滤仅影响展示与记录。
   - 说明：记录页展示层过滤在 `templates/records.html`，未入版本控制。
+
+## 2026-08-19
+
+### 头视裁剪不对称规则修正：不再直接判套牌（未提交）
+
+- **[调整] 车头部件裁剪不对称时相似度照常计算，走「阈值 → 车头AI → 尾部字符检测」链路**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：
+    - `_compute_probs_and_previews_pil`：删除 2026-08-17「`head_ai_asymmetric` 时 `head_prob/tail_prob` 直接置 None、跳过相似度」逻辑，头尾相似度无条件计算；
+    - `_classify_with_ai_second_judge_internal`：删除 2026-08-17「头视裁剪不对称 → 直接套牌」分支。原规则误把车头检测失败当成车辆检测失败——车头部件未裁出（如一侧车尾朝相机）可能只是成像/泛化问题，不再直判套牌；
+    - `_resolve_head_ai_with_crop_guard`：删除 reason 含「无目标车辆/裁切失败侧无目标车辆」标记即强制判套牌（`crop_no_vehicle`）的逻辑，改由 AI 显式 label 或相似度阈值回退决定。
+  - 效果：车头部件不对称样本不再被「整车 vs 车头」垃圾相似度一票判成套牌。
+
+- **[调整] 判定模式「头部车辆裁剪」仅限车辆级裁剪失败**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：`_derive_judge_mode` 的 `crop_failed` 判断从 `vehicle1_ok/vehicle2_ok/head1_ok/head2_ok` 收窄为仅 `vehicle1_ok/vehicle2_ok`；`diff_analyzed_part="头部视角车辆裁剪"` 仅作 2026-08-17~18 历史记录兼容。
+  - 效果：车头部件裁剪失败不再计为「头部车辆裁剪」直判，落入相似度+AI+字符链路。
+
+- **[调整] 差异总结文案优先级**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：`_populate_ai_trace_texts` 中「车辆检测不对称（图片1有车 vs 图片2无车）」优先于车头相似度阈值说明；「头部视角车辆裁剪」分支文案改为历史兼容固定文案。
+
+### 判定模式归类兜底口径修正
+
+- **[修复] 车头 AI 无法判断、回退阈值定案的记录，判定模式归「阈值兜底」**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：`_derive_judge_mode` 车头「ai判断」分支补查 `_ai_fallback`（`图片质量太差 / AI无法判断` 标记）——AI 未给出明确结论、靠相似度阈值兜底判套牌的记录不再归 `ai判断`，落入 `阈值兜底`；与尾部 AI 分支及文档口径「AI无法确定回退阈值的不算 ai判断」保持一致。
+  - 效果：修正如 `20260819_214442_faab0d6b`（车头 AI 无法判断、head 相似度 0.0001 兜底判套牌）这类记录此前被误归 `ai判断` 的问题。
+
+- **[增强] 记录详情返回判定模式**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/my_predict_gui_new.py`
+  - 变更：`api_get_record` 通过 `_derive_judge_mode` 计算并返回 `judge_mode`，与判定模式筛选/运行统计同源。
+  - 说明：链路确认——车头判为 `normal`（AI 明确结论或回退）后仍继续走尾部字符检测/车尾 AI 链路定案，不因车头正常提前结束（既有行为，未改动）。
+
+### 车头 AI 提示词：不对称裁切同位对比规则 C4
+
+- **[提示词] 新增 C4：车头裁剪不对称（一侧完整车头、一侧仅车门侧面）按同位对比定正常**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/qwen_vl/predict_ai.py`
+  - 变更：
+    - `_build_head_crop_context` 不对称裁切规则新增 C4：车头不对称多为相机抓拍角度/距离等成像条件所致，失败侧通常仅见车头侧面（车门区域）；采用同位对比原则重点比对车门颜色、车门喷涂文字、后视镜总成形状与分色等稳定特征，无明显冲突 → 直接判 `normal`（reason 写明比对项）；不得因「一张完整车头、一张侧面」或画面尺度不同判套牌，也不得写「全景 vs 特写不可比 / 图片质量太差，AI无法判断」回避判断（C4 优先于 C3/P3）；
+    - 输出要求同步：车头裁剪不对称且失败侧可见车门侧面（C4）时按同位对比车门/后视镜定 normal，禁止走 P3 unknown；仅真全景 vs 特写（C3/P3）才允许回 unknown。
+  - 效果：消除车头不对称样本被「质量太差 → 相似度兜底」误判套牌的链路，让 AI 基于车门/后视镜等稳定特征给出同位结论。
+
+### 字符检测扩类重训（未提交）
+
+- **[升级] 车挂号/放大号字符集扩至 53 类并重训部署**
+  - 文件：`data_chuli/demo/demo/Siamese-pytorch-master/plate_char_det/char_reader.py`
+  - 变更：
+    - 车挂号 48→53类、放大号 50→53类（含鄂）；类名表从部署侧 `cls_names.json` / `fd_cls_names.json` 动态读取（`range(len(id2char))`），不再硬编码类数；
+    - 权重升级：车挂号检测/分类 `yolo11n_char_v2`→`yolo11n_char_v3`、`yolo11n_char_cls2`→`yolo11n_char_cls3`；放大号检测 `yolo11n_fd_char`→`yolo11n_fd_char_v2`（单类找框）、分类 `yolo11n_fd_char_cls`→`yolo11n_fd_char_cls3`；
+    - 旧权重备份于 `D:\data2\weibu_zifu\_backup\20260819\old\`。
+  - 效果：扩大字符集覆盖，减少生僻字/地区字未收录导致的识别失败。
+
+### 备份整理
+
+- 新增 `备份/0817/my_predict_gui_new.py` 基线快照（2026-08-17 19:27）。
   
